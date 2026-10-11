@@ -1,4 +1,5 @@
 import { startAfterFonts } from "@xcss/web/web-fonts";
+import { startServerCorners } from "@xcss/web/admin-ui/server-corners";
 import { t } from "@xcss/web/admin-ui/i18n";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -79,5 +80,6 @@ const Root = createXcssAdminApplication({ product: { name: "xszs" }, client: adm
 const root = document.getElementById("root");
 if (root === null) throw new Error("The React root element is missing");
 void startAfterFonts(() => {
+  startServerCorners(document);
   createRoot(root).render(<StrictMode><Root /></StrictMode>);
 });

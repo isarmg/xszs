@@ -948,7 +948,7 @@ pub(crate) async fn web_page(State(state): State<AppState>, request: Request) ->
 
 fn secure_page(response: &mut Response) {
     response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     ));
 }
 
@@ -1160,9 +1160,23 @@ mod tests {
         let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
             .to_str()
             .unwrap();
-        assert!(policy.contains("script-src 'self'"));
-        assert!(policy.contains("frame-ancestors 'none'"));
-        assert!(policy.contains("base-uri 'none'"));
+        // The corner renderer uses generated SVG Blob images. Restrict that
+        // addition to img-src; all other page sources stay unchanged.
+        assert_eq!(
+            policy.split(';').map(str::trim).collect::<Vec<_>>(),
+            [
+                "default-src 'self'",
+                "style-src 'self'",
+                "script-src 'self'",
+                "connect-src 'self'",
+                "img-src 'self' data: blob:",
+                "font-src 'self'",
+                "object-src 'none'",
+                "base-uri 'none'",
+                "form-action 'self'",
+                "frame-ancestors 'none'",
+            ]
+        );
         assert!(!policy.contains("unsafe-inline"));
         assert!(!policy.contains("unsafe-eval"));
         assert_eq!(
