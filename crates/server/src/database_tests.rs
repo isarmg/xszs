@@ -31,6 +31,9 @@ const ADMIN_PASSWORD: &str = "test-admin-password";
 const USERNAME: &str = "media-owner";
 const PASSWORD: &str = "correct-horse-battery-staple";
 
+#[path = "tag_limit_tests.rs"]
+mod tag_limit_tests;
+
 struct TestWorkspace {
     root: PathBuf,
 }
