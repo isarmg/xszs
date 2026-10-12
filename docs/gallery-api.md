@@ -31,6 +31,17 @@
 已经读过资产的更新、永久删除都由随后重放的事件补齐。同步游标只能在对应事件成功应用后推进。
 批量标签成员变动同时为旧/新成员集合生成 asset upsert 事件；相册变动使查询页成员缓存失效。
 
+## 每个文件的标签上限
+
+每个资产最多关联 16 个不同标签。`POST /v1/tags/{tag_id}/assets/{asset_id}` 追加单个关联；
+`PUT /v1/tags/{tag_id}/assets` 替换该标签的资产集合，不是替换某个资产的全部标签。
+两者均在同一写事务中检查上限并修改关联。新增第 17 个标签返回 HTTP 400，错误字段为
+`code: "bad_request"`、`message: "asset cannot have more than 16 tags"`、`retryable: false`。
+批量请求中任一新增关联超限时，整个请求回滚，旧成员、其他新增成员、同步事件与审计记录均不改变。
+
+重复的资产 ID 或已有关联不会重复计数，重复追加返回 204。历史超限数据不自动清理；读取、
+保留已有关联和删除关联仍可使用，但不能再增加新标签，直到数量降至 16 以下。
+
 ## 资源内容与视频
 
 `GET /v1/resources/{id}/content` 和 HEAD 返回 ETag（内容 BLAKE3）、Accept-Ranges: bytes。

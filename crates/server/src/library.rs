@@ -17,6 +17,8 @@ use xszs_protocol::{
 
 use crate::{audit, auth::AuthContext, error::AppError, routes::AppState};
 
+const MAX_TAGS_PER_ASSET: i64 = 16;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQuery {
@@ -642,7 +644,8 @@ pub async fn set_tag_assets(
     if request.asset_ids.len() > 10_000 {
         return Err(AppError::bad_request("too many tag assets in one request"));
     }
-    let mut transaction = state.pool.begin().await?;
+    // Serialize the capacity check with every tag association write.
+    let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tags WHERE id = ? AND account_id = ?)")
             .bind(tag_id)
@@ -672,6 +675,11 @@ pub async fn set_tag_assets(
         .fetch_one(&mut *transaction)
         .await?;
         if exists {
+            // Existing members may predate the limit. Retaining one does not
+            // add a tag; repeated IDs in this request do not add one either.
+            if !affected.contains(asset_id) {
+                ensure_tag_capacity(&mut transaction, tag_id, *asset_id).await?;
+            }
             affected.insert(*asset_id);
             sqlx::query(
                 "INSERT INTO tag_assets(tag_id, asset_id, added_at) \
@@ -734,7 +742,7 @@ async fn change_tag_asset(
     asset_id: Uuid,
     add: bool,
 ) -> Result<(), AppError> {
-    let mut transaction = state.pool.begin().await?;
+    let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let valid: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -753,6 +761,7 @@ async fn change_tag_asset(
         return Err(AppError::not_found("tag or asset not found"));
     }
     if add {
+        ensure_tag_capacity(&mut transaction, tag_id, asset_id).await?;
         sqlx::query(
             "INSERT INTO tag_assets(tag_id, asset_id, added_at) \
              VALUES (?, ?, datetime('now')) ON CONFLICT DO NOTHING",
@@ -789,6 +798,30 @@ async fn change_tag_asset(
     )
     .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+async fn ensure_tag_capacity(
+    connection: &mut SqliteConnection,
+    tag_id: Uuid,
+    asset_id: Uuid,
+) -> Result<(), AppError> {
+    let exceeds_limit: bool = sqlx::query_scalar(
+        r#"
+        SELECT NOT EXISTS(SELECT 1 FROM tag_assets WHERE tag_id = ?1 AND asset_id = ?2)
+           AND (SELECT COUNT(*) FROM tag_assets WHERE asset_id = ?2) >= ?3
+        "#,
+    )
+    .bind(tag_id)
+    .bind(asset_id)
+    .bind(MAX_TAGS_PER_ASSET)
+    .fetch_one(connection)
+    .await?;
+    if exceeds_limit {
+        return Err(AppError::bad_request(format!(
+            "asset cannot have more than {MAX_TAGS_PER_ASSET} tags"
+        )));
+    }
     Ok(())
 }
 
