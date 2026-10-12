@@ -1,0 +1,9 @@
+{
+  "bind": "127.0.0.1:8080",
+  "data_dir": "/var/lib/isarmg/xszs",
+  "development": false,
+  "log_level": "info",
+  "trusted_proxies": [],
+  "max_part_bytes": 67108864,
+  "metrics_token": null
+}

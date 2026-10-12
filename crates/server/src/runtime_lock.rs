@@ -282,8 +282,8 @@ pub(crate) fn sqlite_database_path(database_url: &str) -> anyhow::Result<PathBuf
         "xszs requires a file SQLite database"
     );
     ensure!(
-        !value.contains(['?', '#', '%', '\0']),
-        "xszs requires a plain unescaped SQLite file URL"
+        !value.contains('\0'),
+        "SQLite database path must not contain NUL"
     );
     let path = PathBuf::from(value);
     ensure!(path.is_absolute(), "SQLite database path must be absolute");

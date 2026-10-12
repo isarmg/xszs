@@ -127,20 +127,30 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
         .expect("create test storage");
     let config = Config {
         database_url,
-        data_dir: data.to_path_buf(),
+        data_dir: database.parent().unwrap().to_path_buf(),
+        storage_dir: data.to_path_buf(),
+        log_level: "info".into(),
         bind: "127.0.0.1:0".parse().expect("test bind address"),
-        bootstrap_admin_username: ADMIN_USERNAME.to_owned(),
-        bootstrap_admin_password: Some(ADMIN_PASSWORD.to_owned()),
         max_part_bytes: 1024 * 1024,
         upload_global_concurrency: 16,
         upload_per_account_concurrency: 4,
         metrics_token: None,
-        require_https: false,
         development: true,
-        trusted_proxy_cidrs: Vec::new(),
-        credentials_key: [7; 32],
+        development_web_dir: None,
+        trusted_proxies: xcss::client_ip::TrustedProxies::parse(&[]).unwrap(),
         sources: Default::default(),
     };
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !config.data_dir.join("secrets.json").exists() {
+        xcss::server_secrets::initialize(
+            &config.data_dir,
+            &crate::secrets::Secrets {
+                credentials_key: [7; 32],
+            },
+        )
+        .unwrap();
+    }
     let service = xcss::admin_core::AdministratorService::new(
         xcss::admin_sqlite::SqliteAdministratorStore::new(pool.clone()),
     );
@@ -3635,4 +3645,52 @@ async fn upload_manifest_http_budget_accepts_max_parts_and_rejects_oversized_bod
     assert_eq!(rejected["retryable"], false);
     drop(app);
     close_test_state(state, pool).await;
+}
+
+#[tokio::test]
+async fn production_auth_uses_origin_and_secure_cookie_without_forwarded_proto() {
+    let workspace = TestWorkspace::new();
+    let (mut state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    state.config.development = false;
+    state.administrator_origin = xcss::admin_auth::AdministratorOriginMode::ProductionHttps;
+    let app = test_router(state).await;
+    // This route used to return 426 unless an explicitly trusted proxy supplied XFP.
+    let page = Request::builder()
+        .uri("/admin")
+        .header(header::HOST, "photos.example.test")
+        .body(Body::empty())
+        .unwrap();
+    send(&app, page, StatusCode::OK).await;
+    let mut request = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        None,
+        None,
+    );
+    request
+        .headers_mut()
+        .insert(header::HOST, "photos.example.test".parse().unwrap());
+    request.headers_mut().insert(
+        header::ORIGIN,
+        "https://photos.example.test".parse().unwrap(),
+    );
+    let login = send(&app, request, StatusCode::OK).await;
+    assert!(
+        login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Secure")
+    );
+    let request = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        None,
+        None,
+    );
+    let rejected = app.clone().oneshot(request).await.unwrap();
+    assert!(rejected.status().is_client_error());
+    assert_ne!(rejected.status(), StatusCode::UPGRADE_REQUIRED);
+    pool.close().await;
 }

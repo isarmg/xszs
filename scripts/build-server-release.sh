@@ -81,16 +81,16 @@ mkdir -m 0755 -- \
   "$release_root/systemd"
 
 install -m 0755 -- "$binary" "$release_root/bin/xszs"
+install -m 0755 -- "$project_dir/install.sh" "$release_root/install.sh"
 install -m 0755 -- \
-  "$project_dir/scripts/setup-wsl.sh" \
   "$project_dir/scripts/start-server-wsl.sh" \
   "$project_dir/scripts/run-server-wsl.sh" \
   "$project_dir/scripts/verify-server-wsl.sh" \
   "$release_root/scripts/"
 install -m 0644 -- "$project_dir/deploy/xszs.service" \
   "$release_root/systemd/xszs.service"
-install -m 0644 -- "$project_dir/config/xszs.env.example" \
-  "$release_root/config/xszs.env.example"
+install -m 0644 -- "$project_dir/config/xszs.env.example" "$project_dir/config/xszs.json.example" \
+  "$release_root/config/"
 install -m 0644 -- "$project_dir/docs/server-release-readme.md" "$release_root/README.md"
 install -m 0644 -- "$project_dir/docs/feature-inventory-and-tradeoffs.md" \
   "$release_root/docs/feature-inventory-and-tradeoffs.md"

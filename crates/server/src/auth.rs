@@ -1,42 +1,15 @@
 use axum::{
-    extract::{ConnectInfo, Request, State},
-    http::{StatusCode, header::AUTHORIZATION},
+    extract::{Request, State},
+    http::header::AUTHORIZATION,
     middleware::Next,
     response::Response,
 };
 use sha2::{Digest, Sha256};
-use std::{net::SocketAddr, time::Instant};
+use std::time::Instant;
 use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{error::AppError, routes::AppState};
-
-pub async fn require_secure_transport(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    if !state.config.require_https {
-        return Ok(next.run(request).await);
-    }
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(peer)| peer.ip());
-    if peer.is_some_and(|peer| {
-        crate::trusted_proxy::forwarded_as_https(
-            peer,
-            request.headers(),
-            &state.config.trusted_proxy_cidrs,
-        )
-    }) {
-        return Ok(next.run(request).await);
-    }
-    Err(AppError::new(
-        StatusCode::UPGRADE_REQUIRED,
-        "HTTPS is required",
-    ))
-}
 
 #[derive(Debug, Clone)]
 pub struct AuthContext {

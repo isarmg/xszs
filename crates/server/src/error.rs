@@ -120,7 +120,6 @@ fn error_envelope(status: StatusCode, message: String) -> ErrorEnvelope {
         StatusCode::NOT_ACCEPTABLE => ("not_acceptable", false),
         StatusCode::PAYLOAD_TOO_LARGE => ("payload_too_large", false),
         StatusCode::UNSUPPORTED_MEDIA_TYPE => ("unsupported_media_type", false),
-        StatusCode::UPGRADE_REQUIRED => ("secure_transport_required", false),
         StatusCode::REQUEST_TIMEOUT => ("request_timeout", true),
         _ if status.is_server_error() => ("server_error", true),
         _ => ("request_failed", false),

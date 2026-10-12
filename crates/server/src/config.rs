@@ -8,9 +8,8 @@ use std::{
 use xcss::config::{ConfigSource, EnvMapping, EnvValueKind, Override};
 
 use anyhow::{Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::trusted_proxy::TrustedNetwork;
+use xcss::client_ip::TrustedProxies;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
@@ -18,17 +17,16 @@ const DEFAULT_BIND: &str = "127.0.0.1:8080";
 pub struct Config {
     pub database_url: String,
     pub data_dir: PathBuf,
+    pub storage_dir: PathBuf,
+    pub log_level: String,
     pub bind: SocketAddr,
-    pub bootstrap_admin_username: String,
-    pub bootstrap_admin_password: Option<String>,
     pub max_part_bytes: usize,
     pub upload_global_concurrency: usize,
     pub upload_per_account_concurrency: usize,
     pub metrics_token: Option<String>,
-    pub require_https: bool,
     pub development: bool,
-    pub trusted_proxy_cidrs: Vec<TrustedNetwork>,
-    pub credentials_key: [u8; 32],
+    pub development_web_dir: Option<PathBuf>,
+    pub trusted_proxies: TrustedProxies,
     pub sources: BTreeMap<String, ConfigSource>,
 }
 
@@ -37,8 +35,9 @@ impl Config {
         config: Option<&Path>,
         data_dir: Option<&Path>,
         bind: Option<SocketAddr>,
+        development: Option<bool>,
     ) -> Result<Self> {
-        let config = config.map(normalize_config_path).transpose()?;
+        let config = selected_config_path(config)?;
         let file = config
             .as_deref()
             .map(xcss::config::read_private_file)
@@ -54,6 +53,9 @@ impl Config {
         if let Some(bind) = bind {
             command_line.push(Override::new("/bind", bind.to_string()));
         }
+        if let Some(development) = development {
+            command_line.push(Override::new("/development", development));
+        }
         let loaded = xcss::config::resolve_validated(
             &Settings::default(),
             file.as_deref(),
@@ -64,17 +66,24 @@ impl Config {
         let settings = loaded.value;
         let data_dir = settings.data_dir.context("data_dir is required")?;
         anyhow::ensure!(data_dir.is_absolute(), "data_dir must be absolute");
-        let database_url = settings
-            .database_url
-            .unwrap_or_else(|| format!("sqlite://{}", data_dir.join("xszs.sqlite3").display()));
+        let database_url = format!("sqlite://{}", data_dir.join("xszs.sqlite3").display());
         crate::database::database_path(&database_url)?;
-        let bind = bind_address(Some(settings.bind))?;
-        let bootstrap_admin_username =
-            configured_administrator_username(settings.bootstrap_admin_username)?;
-        let bootstrap_admin_password = settings.bootstrap_admin_password;
-        if let Some(password) = &bootstrap_admin_password {
-            xcss::admin_auth::validate_password(password)?;
-        }
+        let storage_dir = settings
+            .storage_dir
+            .unwrap_or_else(|| data_dir.join("media"));
+        anyhow::ensure!(storage_dir.is_absolute(), "storage_dir must be absolute");
+        anyhow::ensure!(
+            !data_dir.starts_with(&storage_dir),
+            "storage_dir cannot contain the internal data_dir"
+        );
+        anyhow::ensure!(
+            !storage_dir
+                .components()
+                .chain(data_dir.components())
+                .any(|part| part == std::path::Component::ParentDir),
+            "state and storage paths cannot contain parent traversal"
+        );
+        let bind = settings.bind;
         anyhow::ensure!(
             (16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes),
             "max_part_bytes must be between 16 MiB and 64 MiB to support mobile uploads"
@@ -87,39 +96,29 @@ impl Config {
             settings.upload_per_account_concurrency <= settings.upload_global_concurrency,
             "upload_per_account_concurrency cannot exceed upload_global_concurrency"
         );
-        validate_security_mode(bind, settings.require_https, settings.development)?;
-        let trusted_proxy_cidrs = settings
-            .trusted_proxy_cidrs
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::parse)
-            .collect::<std::result::Result<Vec<TrustedNetwork>, String>>()
-            .map_err(anyhow::Error::msg)?;
-        let decoded_key = STANDARD
-            .decode(
-                settings
-                    .credentials_key
-                    .context("credentials_key is required")?,
-            )
-            .context("credentials_key must be valid base64")?;
-        let credentials_key = decoded_key
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("credentials_key must decode to exactly 32 bytes"))?;
+        validate_security_mode(bind, settings.development)?;
+        if let Some(path) = &settings.development_web_dir {
+            anyhow::ensure!(
+                settings.development && env!("XSZS_SOURCE_REVISION") == "unbound",
+                "development_web_dir requires an unbound development build"
+            );
+            anyhow::ensure!(path.is_absolute(), "development_web_dir must be absolute");
+            xcss::web_assets::DirectoryAssets::new(path)?;
+        }
+        let trusted_proxies = TrustedProxies::parse(&settings.trusted_proxies)?;
         Ok(Self {
             database_url,
             data_dir,
+            storage_dir,
+            log_level: settings.log_level,
             bind,
-            bootstrap_admin_username,
-            bootstrap_admin_password,
             max_part_bytes: settings.max_part_bytes,
             upload_global_concurrency: settings.upload_global_concurrency,
             upload_per_account_concurrency: settings.upload_per_account_concurrency,
             metrics_token: settings.metrics_token,
-            require_https: settings.require_https,
             development: settings.development,
-            trusted_proxy_cidrs,
-            credentials_key,
+            development_web_dir: settings.development_web_dir,
+            trusted_proxies,
             sources: loaded.sources,
         })
     }
@@ -128,109 +127,96 @@ impl Config {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
-    database_url: Option<String>,
     data_dir: Option<PathBuf>,
-    bind: String,
-    bootstrap_admin_username: String,
-    bootstrap_admin_password: Option<String>,
+    storage_dir: Option<PathBuf>,
+    log_level: String,
+    bind: SocketAddr,
     max_part_bytes: usize,
     upload_global_concurrency: usize,
     upload_per_account_concurrency: usize,
     metrics_token: Option<String>,
-    require_https: bool,
     development: bool,
-    trusted_proxy_cidrs: String,
-    credentials_key: Option<String>,
+    development_web_dir: Option<PathBuf>,
+    trusted_proxies: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            database_url: None,
-            data_dir: None,
-            bind: DEFAULT_BIND.into(),
-            bootstrap_admin_username: "admin".into(),
-            bootstrap_admin_password: None,
+            data_dir: Some(PathBuf::from("/var/lib/isarmg/xszs")),
+            storage_dir: None,
+            log_level: "info".into(),
+            bind: DEFAULT_BIND.parse().expect("valid default bind"),
             max_part_bytes: 64 * 1024 * 1024,
             upload_global_concurrency: 16,
             upload_per_account_concurrency: 4,
             metrics_token: None,
-            require_https: true,
             development: false,
-            trusted_proxy_cidrs: String::new(),
-            credentials_key: None,
+            development_web_dir: None,
+            trusted_proxies: Vec::new(),
         }
     }
 }
 
-const ENVIRONMENT: [EnvMapping<'static>; 13] = [
+const ENVIRONMENT: [EnvMapping<'static>; 11] = [
     EnvMapping {
-        variable: "DATABASE_URL",
-        path: "/database_url",
+        variable: "XSZS_STORAGE_DIR",
+        path: "/storage_dir",
         kind: EnvValueKind::String,
     },
     EnvMapping {
-        variable: "DATA_DIR",
+        variable: "XSZS_LOG_LEVEL",
+        path: "/log_level",
+        kind: EnvValueKind::String,
+    },
+    EnvMapping {
+        variable: "XSZS_DEVELOPMENT_WEB_DIR",
+        path: "/development_web_dir",
+        kind: EnvValueKind::String,
+    },
+    EnvMapping {
+        variable: "XSZS_DATA_DIR",
         path: "/data_dir",
         kind: EnvValueKind::String,
     },
     EnvMapping {
-        variable: "BIND",
+        variable: "XSZS_BIND",
         path: "/bind",
         kind: EnvValueKind::String,
     },
     EnvMapping {
-        variable: "BOOTSTRAP_ADMIN_USERNAME",
-        path: "/bootstrap_admin_username",
-        kind: EnvValueKind::String,
-    },
-    EnvMapping {
-        variable: "BOOTSTRAP_ADMIN_PASSWORD",
-        path: "/bootstrap_admin_password",
-        kind: EnvValueKind::String,
-    },
-    EnvMapping {
-        variable: "MAX_PART_BYTES",
+        variable: "XSZS_MAX_PART_BYTES",
         path: "/max_part_bytes",
         kind: EnvValueKind::UnsignedInteger,
     },
     EnvMapping {
-        variable: "UPLOAD_GLOBAL_CONCURRENCY",
+        variable: "XSZS_UPLOAD_GLOBAL_CONCURRENCY",
         path: "/upload_global_concurrency",
         kind: EnvValueKind::UnsignedInteger,
     },
     EnvMapping {
-        variable: "UPLOAD_PER_ACCOUNT_CONCURRENCY",
+        variable: "XSZS_UPLOAD_PER_ACCOUNT_CONCURRENCY",
         path: "/upload_per_account_concurrency",
         kind: EnvValueKind::UnsignedInteger,
     },
     EnvMapping {
-        variable: "METRICS_TOKEN",
+        variable: "XSZS_METRICS_TOKEN",
         path: "/metrics_token",
         kind: EnvValueKind::String,
     },
     EnvMapping {
-        variable: "REQUIRE_HTTPS",
-        path: "/require_https",
-        kind: EnvValueKind::Boolean,
-    },
-    EnvMapping {
-        variable: "DEVELOPMENT",
+        variable: "XSZS_DEVELOPMENT",
         path: "/development",
         kind: EnvValueKind::Boolean,
     },
     EnvMapping {
-        variable: "TRUSTED_PROXY_CIDRS",
-        path: "/trusted_proxy_cidrs",
-        kind: EnvValueKind::String,
-    },
-    EnvMapping {
-        variable: "XSZS_CREDENTIALS_KEY",
-        path: "/credentials_key",
-        kind: EnvValueKind::String,
+        variable: "XSZS_TRUSTED_PROXIES",
+        path: "/trusted_proxies",
+        kind: EnvValueKind::Json,
     },
 ];
 
+#[cfg(test)]
 fn bind_address(value: Option<String>) -> Result<SocketAddr> {
     value
         .unwrap_or_else(|| DEFAULT_BIND.to_owned())
@@ -238,17 +224,15 @@ fn bind_address(value: Option<String>) -> Result<SocketAddr> {
         .context("BIND must be a socket address")
 }
 
+#[cfg(test)]
 fn configured_administrator_username(value: String) -> Result<String> {
     xcss::admin_auth::normalize_administrator_username(&value)
         .map_err(|error| anyhow::anyhow!("ADMIN_USERNAME is invalid: {error}"))
 }
 
-fn validate_security_mode(bind: SocketAddr, require_https: bool, development: bool) -> Result<()> {
+fn validate_security_mode(bind: SocketAddr, development: bool) -> Result<()> {
     if development && !bind.ip().is_loopback() {
         anyhow::bail!("DEVELOPMENT=true requires a loopback BIND address");
-    }
-    if !development && !require_https {
-        anyhow::bail!("production mode requires REQUIRE_HTTPS=true");
     }
     Ok(())
 }
@@ -282,11 +266,11 @@ mod tests {
 
     #[test]
     fn insecure_cookies_are_limited_to_explicit_loopback_development() {
-        assert!(validate_security_mode("127.0.0.1:8080".parse().unwrap(), false, true).is_ok());
-        assert!(validate_security_mode("[::1]:8080".parse().unwrap(), false, true).is_ok());
-        assert!(validate_security_mode("0.0.0.0:8080".parse().unwrap(), false, true).is_err());
-        assert!(validate_security_mode("127.0.0.1:8080".parse().unwrap(), false, false).is_err());
-        assert!(validate_security_mode("0.0.0.0:8080".parse().unwrap(), true, false).is_ok());
+        assert!(validate_security_mode("127.0.0.1:8080".parse().unwrap(), true).is_ok());
+        assert!(validate_security_mode("[::1]:8080".parse().unwrap(), true).is_ok());
+        assert!(validate_security_mode("0.0.0.0:8080".parse().unwrap(), true).is_err());
+        assert!(validate_security_mode("127.0.0.1:8080".parse().unwrap(), false).is_ok());
+        assert!(validate_security_mode("0.0.0.0:8080".parse().unwrap(), false).is_ok());
     }
 }
 
@@ -296,25 +280,7 @@ fn validate_intrinsic(
 ) -> Result<(), xcss::config::ConfigError> {
     let invalid =
         |path| xcss::config::ConfigError::new(xcss::config::Reason::InvalidValue, path, source);
-    settings
-        .bind
-        .parse::<SocketAddr>()
-        .map_err(|_| invalid("/bind"))?;
-    if let Some(key) = &settings.credentials_key
-        && STANDARD
-            .decode(key)
-            .map_err(|_| invalid("/credentials_key"))?
-            .len()
-            != 32
-    {
-        return Err(invalid("/credentials_key"));
-    }
-    configured_administrator_username(settings.bootstrap_admin_username.clone())
-        .map_err(|_| invalid("/bootstrap_admin_username"))?;
-    if let Some(password) = &settings.bootstrap_admin_password {
-        xcss::admin_auth::validate_password(password)
-            .map_err(|_| invalid("/bootstrap_admin_password"))?;
-    }
+
     if settings
         .data_dir
         .as_ref()
@@ -322,11 +288,21 @@ fn validate_intrinsic(
     {
         return Err(invalid("/data_dir"));
     }
-    if let Some(url) = &settings.database_url {
-        crate::database::database_path(url).map_err(|_| invalid("/database_url"))?;
-    }
     if !(16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes) {
         return Err(invalid("/max_part_bytes"));
+    }
+    if settings
+        .storage_dir
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(invalid("/storage_dir"));
+    }
+    if !matches!(
+        settings.log_level.as_str(),
+        "error" | "warn" | "info" | "debug" | "trace" | "off"
+    ) {
+        return Err(invalid("/log_level"));
     }
     for (path, value) in [
         (
@@ -342,16 +318,7 @@ fn validate_intrinsic(
             return Err(invalid(path));
         }
     }
-    for network in settings
-        .trusted_proxy_cidrs
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        network
-            .parse::<TrustedNetwork>()
-            .map_err(|_| invalid("/trusted_proxy_cidrs"))?;
-    }
+    TrustedProxies::parse(&settings.trusted_proxies).map_err(|_| invalid("/trusted_proxies"))?;
     Ok(())
 }
 
@@ -430,4 +397,151 @@ pub fn normalize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
         "config path cannot contain parent traversal"
     );
     Ok(std::path::absolute(path)?)
+}
+
+#[cfg(test)]
+mod unified_configuration_tests {
+    use super::*;
+    #[test]
+    fn explicit_missing_config_is_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert!(Config::from_sources(Some(&missing), None, None, None).is_err());
+    }
+    #[test]
+    fn defaults_and_environment_belong_to_this_server() {
+        let settings = Settings::default();
+        assert!(!settings.development);
+        assert_eq!(
+            settings.data_dir.unwrap(),
+            PathBuf::from("/var/lib/isarmg/xszs")
+        );
+        assert!(
+            ENVIRONMENT
+                .iter()
+                .all(|mapping| mapping.variable.starts_with("XSZS_"))
+        );
+        assert!(
+            !ENVIRONMENT
+                .iter()
+                .any(|mapping| mapping.path.contains("bootstrap"))
+        );
+    }
+    #[test]
+    fn runtime_configuration_rejects_bootstrap_passwords() {
+        let file = br#"{"bootstrap_admin_password":"never-persist-this"}"#;
+        assert!(
+            xcss::config::resolve_validated(
+                &Settings::default(),
+                Some(file),
+                &[],
+                &[],
+                validate_intrinsic
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn bind_precedence_is_cli_then_prefixed_environment_then_file() {
+        let file = br#"{"bind":"127.0.0.1:19001"}"#;
+        let environment = xcss::config::read_environment(&ENVIRONMENT, |name| {
+            (name == "XSZS_BIND").then(|| "127.0.0.1:19002".into())
+        })
+        .unwrap();
+        let loaded = xcss::config::resolve_validated(
+            &Settings::default(),
+            Some(file),
+            &environment,
+            &[Override::new("/bind", "127.0.0.1:19003")],
+            validate_intrinsic,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.value.bind,
+            "127.0.0.1:19003".parse::<SocketAddr>().unwrap()
+        );
+        let loaded = xcss::config::resolve_validated(
+            &Settings::default(),
+            Some(file),
+            &environment,
+            &[],
+            validate_intrinsic,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.value.bind,
+            "127.0.0.1:19002".parse::<SocketAddr>().unwrap()
+        );
+    }
+}
+
+/// An omitted default file is optional; explicit files and unreadable defaults fail closed.
+pub fn selected_config_path(config: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
+    match config {
+        Some(path) => Ok(Some(normalize_config_path(path)?)),
+        None => {
+            let path = PathBuf::from("/etc/isarmg/xszs/config.json");
+            existing_default_config(path)
+        }
+    }
+}
+
+fn existing_default_config(path: PathBuf) -> anyhow::Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod default_configuration_tests {
+    use super::*;
+    #[test]
+    fn dangling_default_symlink_is_not_treated_as_an_absent_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        assert!(existing_default_config(path.clone()).unwrap().is_none());
+        std::os::unix::fs::symlink(directory.path().join("missing.json"), &path).unwrap();
+        let selected = existing_default_config(path).unwrap().unwrap();
+        assert!(xcss::config::read_private_file(&selected).is_err());
+    }
+}
+
+#[cfg(test)]
+mod state_configuration_tests {
+    use super::*;
+    #[test]
+    fn obsolete_state_and_secret_overrides_are_rejected() {
+        for file in [
+            br#"{"database_url":"sqlite:///tmp/other.db"}"#.as_slice(),
+            br#"{"credentials_key":"old-key"}"#.as_slice(),
+            br#"{"trusted_proxy_cidrs":"127.0.0.1"}"#.as_slice(),
+        ] {
+            assert!(
+                xcss::config::resolve_validated(
+                    &Settings::default(),
+                    Some(file),
+                    &[],
+                    &[],
+                    validate_intrinsic
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn log_level_is_a_simple_validated_level() {
+        let file = br#"{"log_level":"invalid-secret-level"}"#;
+        assert!(
+            xcss::config::resolve_validated(
+                &Settings::default(),
+                Some(file),
+                &[],
+                &[],
+                validate_intrinsic
+            )
+            .is_err()
+        );
+    }
 }

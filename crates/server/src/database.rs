@@ -1,7 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
     path::{Component, Path, PathBuf},
-    str::FromStr,
     time::Duration,
 };
 
@@ -32,7 +31,8 @@ pub(crate) async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
 /// This accepts the lock's descriptor-rooted URL without recapturing a source
 /// database that SQLx may already have opened in this process.
 pub(crate) async fn connect_validated_location(database_url: &str) -> anyhow::Result<SqlitePool> {
-    let options = SqliteConnectOptions::from_str(database_url)?
+    let options = SqliteConnectOptions::new()
+        .filename(database_path(database_url)?)
         .create_if_missing(false)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
@@ -172,8 +172,8 @@ pub(crate) fn database_path(database_url: &str) -> anyhow::Result<PathBuf> {
     ensure!(!value.is_empty(), "SQLite database path must not be empty");
     ensure!(value != ":memory:", "in-memory SQLite is not supported");
     ensure!(
-        !value.contains(['?', '#', '%', '\0']),
-        "DATABASE_URL must be a plain, unescaped SQLite file URL"
+        !value.contains('\0'),
+        "SQLite database path must not contain NUL"
     );
     let path = PathBuf::from(value);
     ensure!(path.is_absolute(), "SQLite database path must be absolute");

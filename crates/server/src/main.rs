@@ -15,8 +15,8 @@ mod release;
 mod rooted_fs;
 mod routes;
 mod runtime_lock;
+mod secrets;
 mod storage;
-mod trusted_proxy;
 mod upload_commit;
 mod web_assets;
 
@@ -103,12 +103,6 @@ async fn query_status(bind: std::net::SocketAddr, json: bool) -> anyhow::Result<
 }
 
 async fn execute(mut cli: Cli) -> Result<()> {
-    cli.config = cli
-        .config
-        .as_deref()
-        .map(config::normalize_config_path)
-        .transpose()?;
-    initialize_logging()?;
     let command = cli.command;
     match &command {
         Command::WebAssets => {
@@ -134,45 +128,32 @@ async fn execute(mut cli: Cli) -> Result<()> {
             println!("{}", release::verification_line(&identity));
             return Ok(());
         }
-        Command::Run { release_root } => {
-            if let Some(root) = release_root {
-                let physical = release::resolve_run_root(root)?;
-                release::verify_runtime(&physical)?;
-            } else {
-                release::ensure_unbound_development_serve()?;
-            }
-        }
+        Command::Run => {}
         Command::Doctor
         | Command::Reconcile {
             command: ReconcileCommand::Scan,
         }
-        | Command::Init
+        | Command::Init { .. }
+        | Command::Check
+        | Command::Admin { .. }
         | Command::Config {
             command: ConfigCommand::Validate,
         }
         | Command::Status => {}
     }
-    let config = Config::from_sources(cli.config.as_deref(), cli.data_dir.as_deref(), cli.bind)?;
+    cli.config = config::selected_config_path(cli.config.as_deref())?;
+    let config = Config::from_sources(
+        cli.config.as_deref(),
+        cli.data_dir.as_deref(),
+        cli.bind,
+        cli.development,
+    )?;
     xcss::web_assets::verify_embedded(
         web_assets::ASSETS,
         web_assets::MANIFEST,
         web_assets::DIGEST,
     )?;
-    if matches!(
-        command,
-        Command::Run {
-            release_root: Some(_)
-        }
-    ) && std::env::var_os("XCSS_DEV_WEB_DIR").is_some()
-    {
-        anyhow::bail!("formal releases cannot override embedded Web assets");
-    }
-    if std::env::var_os("XCSS_DEV_WEB_DIR").is_some() {
-        anyhow::ensure!(
-            config.development && env!("XSZS_SOURCE_REVISION") == "unbound",
-            "XCSS_DEV_WEB_DIR requires an unbound development build"
-        );
-    }
+    initialize_logging(&config.log_level)?;
     match command {
         Command::Doctor => {
             let directory = xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
@@ -184,8 +165,10 @@ async fn execute(mut cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string(&doctor::run(&config)?)?);
             return Ok(());
         }
-        Command::Init => {
-            initialize(&config).await?;
+        Command::Init { username } => {
+            let username = xcss::admin_auth::normalize_administrator_username(&username)?;
+            let password = read_password_from_stdin()?;
+            initialize(&config, &username, &password).await?;
             tracing::info!(event = "common.initialization.completed");
             println!(
                 "{}",
@@ -196,11 +179,29 @@ async fn execute(mut cli: Cli) -> Result<()> {
         Command::Config {
             command: ConfigCommand::Validate,
         } => {
+            println!(
+                "{}",
+                serde_json::json!({"status":"valid", "state_paths":[config.data_dir, config.storage_dir], "sources":config.sources})
+            );
+            return Ok(());
+        }
+        Command::Check => {
+            let directory = xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
+            xcss::server_cli::runtime_allowed(directory.path())
+                .map_err(xcss::server_cli::CliError)?;
+            let _lock = directory.try_maintenance_lock()?;
             validate_existing_configuration(&config).await?;
             println!(
                 "{}",
-                serde_json::json!({"status":"valid", "state_paths":std::iter::once(config.data_dir.clone()).chain(std::iter::once(database::database_path(&config.database_url)?.parent().context("database parent is required")?.to_path_buf())).chain(cli.config.as_ref().map(|path| path.canonicalize()).transpose()?).collect::<Vec<_>>(), "sources":config.sources, "schema_identity":database::current_schema_identity()?})
+                serde_json::json!({"status":"ok", "schema_identity":database::current_schema_identity()?})
             );
+            return Ok(());
+        }
+        Command::Admin {
+            command: AdminCommand::ResetPassword { username },
+        } => {
+            reset_administrator_password(&config, &username).await?;
+            println!("{}", serde_json::json!({"status":"password-reset"}));
             return Ok(());
         }
         Command::Status => {
@@ -217,11 +218,11 @@ async fn execute(mut cli: Cli) -> Result<()> {
             xcss::server_cli::runtime_allowed(directory.path())
                 .map_err(xcss::server_cli::CliError)?;
             let _runtime_lock =
-                runtime_lock::RuntimeLock::acquire(&config.database_url, &config.data_dir)?;
+                runtime_lock::RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
             validate_existing_configuration(&config).await?;
             let pool = database::connect_validated_location(&_runtime_lock.database_url()?).await?;
             _runtime_lock.verify_original_paths()?;
-            let storage = LocalStorage::open_existing(config.data_dir.clone()).await?;
+            let storage = LocalStorage::open_existing(config.storage_dir.clone()).await?;
             let state = build_state(&config, pool, storage).await?;
             println!(
                 "{}",
@@ -229,7 +230,7 @@ async fn execute(mut cli: Cli) -> Result<()> {
             );
             return Ok(());
         }
-        Command::Run { .. } => {}
+        Command::Run => {}
         Command::WebAssets
         | Command::ReleaseIdentity
         | Command::ReleaseVerify { .. }
@@ -249,11 +250,12 @@ async fn execute(mut cli: Cli) -> Result<()> {
     validate_existing_configuration(&config).await?;
     enable_runtime_logging(&config.data_dir)?;
     tracing::info!(event = "common.config.loaded");
-    let _runtime_lock = runtime_lock::RuntimeLock::acquire(&config.database_url, &config.data_dir)?;
+    let _runtime_lock =
+        runtime_lock::RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
     validate_existing_configuration(&config).await?;
     let pool = database::connect_validated_location(&_runtime_lock.database_url()?).await?;
     _runtime_lock.verify_original_paths()?;
-    let storage = LocalStorage::open_existing(config.data_dir.clone()).await?;
+    let storage = LocalStorage::open_existing(config.storage_dir.clone()).await?;
     let state = build_state(&config, pool, storage).await?;
     let reconciliation = upload_commit::reconcile_all(&state).await?;
     info!(
@@ -363,27 +365,26 @@ async fn build_state(
         "service is not initialized; run init to create the first administrator"
     );
     administrator.store().validate_all_administrators().await?;
-    crypto::validate_persisted_authorizations(&pool, &config.credentials_key).await?;
+    let persistent_secrets = secrets::load(&config.data_dir)?;
+    crypto::validate_persisted_authorizations(&pool, &persistent_secrets.credentials_key).await?;
     let administrator_origin = if config.development {
         xcss::admin_auth::AdministratorOriginMode::LoopbackDevelopmentHttp
     } else {
         xcss::admin_auth::AdministratorOriginMode::ProductionHttps
     };
-    let web_directory = match std::env::var_os("XCSS_DEV_WEB_DIR") {
+    let web_directory = match &config.development_web_dir {
         Some(path) => {
             anyhow::ensure!(
                 config.development && env!("XSZS_SOURCE_REVISION") == "unbound",
-                "XCSS_DEV_WEB_DIR requires an unbound development build"
+                "XSZS_DEVELOPMENT_WEB_DIR requires an unbound development build"
             );
-            Some(Arc::new(xcss::web_assets::DirectoryAssets::new(
-                PathBuf::from(path),
-            )?))
+            Some(Arc::new(xcss::web_assets::DirectoryAssets::new(path)?))
         }
         None => None,
     };
     Ok(AppState {
         web_directory,
-        secrets: crypto::SecretBox::new(&config.credentials_key),
+        secrets: crypto::SecretBox::new(&persistent_secrets.credentials_key),
         pool,
         storage,
         config: config.clone(),
@@ -418,22 +419,29 @@ struct Cli {
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     bind: Option<std::net::SocketAddr>,
+    #[arg(long, global = true, action = clap::ArgAction::Set)]
+    development: Option<bool>,
     #[arg(long, global = true)]
     json: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    Init,
-    Run {
-        #[arg(long)]
-        release_root: Option<PathBuf>,
+    Init {
+        #[arg(long, default_value = "admin")]
+        username: String,
     },
+    Run,
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
     Status,
+    Check,
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
     Doctor,
     Reconcile {
         #[command(subcommand)]
@@ -449,6 +457,13 @@ enum Command {
     },
 }
 #[derive(Subcommand)]
+enum AdminCommand {
+    ResetPassword {
+        #[arg(long)]
+        username: String,
+    },
+}
+#[derive(Subcommand)]
 enum ConfigCommand {
     Validate,
 }
@@ -457,13 +472,8 @@ enum ReconcileCommand {
     Scan,
 }
 
-async fn initialize(config: &Config) -> Result<()> {
-    let password = config
-        .bootstrap_admin_password
-        .as_deref()
-        .context("bootstrap_admin_password is required for init")?;
+async fn initialize(config: &Config, username: &str, password: &str) -> Result<()> {
     xcss::admin_auth::validate_password(password)?;
-    xcss::server_cli::runtime_allowed(&config.data_dir).map_err(xcss::server_cli::CliError)?;
     xcss::server_cli::create_empty_private_directory(&config.data_dir)
         .map_err(xcss::server_cli::CliError)?;
     let directory = xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
@@ -472,7 +482,10 @@ async fn initialize(config: &Config) -> Result<()> {
     xcss::server_cli::runtime_allowed(directory.path()).map_err(xcss::server_cli::CliError)?;
     xcss::server_cli::create_runtime_log_directory(&config.data_dir)
         .map_err(xcss::server_cli::CliError)?;
-    let _runtime_lock = runtime_lock::RuntimeLock::acquire(&config.database_url, &config.data_dir)?;
+    LocalStorage::new(config.storage_dir.clone()).await?;
+    let _runtime_lock =
+        runtime_lock::RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
+    secrets::initialize(&config.data_dir)?;
     database::initialize(&config.database_url)?;
     database::validate_current_database(&database::database_path(&config.database_url)?)?;
     let pool = database::connect_validated_location(&_runtime_lock.database_url()?).await?;
@@ -481,29 +494,42 @@ async fn initialize(config: &Config) -> Result<()> {
         xcss::admin_sqlite::SqliteAdministratorStore::new(pool.clone()),
     );
     service
-        .bootstrap_administrator(
-            &config.bootstrap_admin_username,
-            password,
-            current_time_micros()?,
-        )
+        .bootstrap_administrator(username, password, current_time_micros()?)
         .await?;
-    LocalStorage::new(config.data_dir.clone()).await?;
     xcss::sqlite::checkpoint(&pool).await?;
     pool.close().await;
     Ok(())
 }
 
+async fn reset_administrator_password(config: &Config, username: &str) -> Result<()> {
+    let username = xcss::admin_auth::normalize_administrator_username(username)?;
+    let password = read_password_from_stdin()?;
+    xcss::admin_auth::validate_password(&password)?;
+    let directory = xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
+    xcss::server_cli::runtime_allowed(directory.path()).map_err(xcss::server_cli::CliError)?;
+    let _maintenance = directory.try_maintenance_lock()?;
+    let lock = runtime_lock::RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
+    validate_existing_configuration(config).await?;
+    let pool = database::connect_validated_location(&lock.database_url()?).await?;
+    let service = xcss::admin_core::AdministratorService::new(
+        xcss::admin_sqlite::SqliteAdministratorStore::new(pool.clone()),
+    );
+    service
+        .change_administrator_password(&username, &password, current_time_micros()?)
+        .await?;
+    pool.close().await;
+    Ok(())
+}
+
 static LOG_LAYER: std::sync::OnceLock<xcss::log::XcssStructuredLayer> = std::sync::OnceLock::new();
-fn initialize_logging() -> anyhow::Result<()> {
+fn initialize_logging(log_level: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
     let layer = xcss::log::XcssStructuredLayer::new("xszs")?;
     LOG_LAYER
         .set(layer.clone())
         .map_err(|_| anyhow::anyhow!("logging already initialized"))?;
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with(tracing_subscriber::EnvFilter::try_new(log_level)?)
         .with(layer)
         .try_init()?;
     Ok(())
@@ -529,7 +555,7 @@ async fn validate_existing_configuration(config: &Config) -> anyhow::Result<()> 
     xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
     database::validate_current_database(&database::database_path(&config.database_url)?)?;
     database::integrity_and_foreign_key_check(&database::database_path(&config.database_url)?)?;
-    LocalStorage::open_existing(config.data_dir.clone()).await?;
+    LocalStorage::open_existing(config.storage_dir.clone()).await?;
     let snapshot =
         xcss::server_cli::open_validation_snapshot(database::database_path(&config.database_url)?)
             .await?;
@@ -540,9 +566,38 @@ async fn validate_existing_configuration(config: &Config) -> anyhow::Result<()> 
         "administrator initialization is required"
     );
     administrator.validate_all_administrators().await?;
-    crypto::validate_persisted_authorizations(snapshot.pool(), &config.credentials_key).await?;
+    crypto::validate_persisted_authorizations(
+        snapshot.pool(),
+        &secrets::load(&config.data_dir)?.credentials_key,
+    )
+    .await?;
     snapshot.close().await;
     Ok(())
+}
+
+fn read_password_from_stdin() -> anyhow::Result<String> {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .context("read administrator password from standard input")?;
+    anyhow::ensure!(
+        bytes.len() <= 4096,
+        "administrator password input is too large"
+    );
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    anyhow::ensure!(
+        !bytes.contains(&b'\n') && !bytes.contains(&b'\r'),
+        "administrator password must be one line"
+    );
+    String::from_utf8(bytes).context("administrator password must be UTF-8")
 }
 
 #[cfg(test)]
@@ -573,7 +628,12 @@ mod command_tests {
                 );
             }
         }
-        for args in [vec!["backup", "create"], vec!["restore"], vec!["migrate"]] {
+        for args in [
+            vec!["backup", "create"],
+            vec!["restore"],
+            vec!["migrate"],
+            vec!["run", "--release-root", "/tmp/release"],
+        ] {
             assert!(Cli::try_parse_from(std::iter::once("xszs").chain(args)).is_err());
         }
     }

@@ -39,6 +39,11 @@ jobs:
         working-directory: web
         run: node tests/browser-acceptance.mjs
       - run: ./scripts/check-workflow-supply-chain.sh
+      - name: Verify installation contract
+        run: |
+          bash -n install.sh scripts/*.sh
+          python3 scripts/test-installation.py
+          python3 scripts/test_release_manifest.py
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings

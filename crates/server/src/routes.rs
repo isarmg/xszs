@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{ConnectInfo, DefaultBodyLimit, Extension, State},
+    extract::{DefaultBodyLimit, Extension, State},
     http::StatusCode,
     middleware,
     routing::{get, post, put},
@@ -11,7 +11,7 @@ use rand::{TryRng, rngs::SysRng};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::timeout,
@@ -26,7 +26,7 @@ use xszs_protocol::{
 
 use crate::{
     admin, api_access, audit,
-    auth::{AuthContext, require_auth, require_secure_transport},
+    auth::{AuthContext, require_auth},
     config::Config,
     error::AppError,
     library,
@@ -211,11 +211,7 @@ pub fn router(
         .route("/admin/", get(admin::web_page))
         .route("/admin/assets/{*path}", get(admin::web_page))
         .nest(API_BASE_PATH, mobile_api)
-        .merge(admin_protected)
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_secure_transport,
-        ));
+        .merge(admin_protected);
 
     let platform = xcss::server_runtime::platform_router(
         runtime,
@@ -224,6 +220,7 @@ pub fn router(
         Arc::clone(&state.administrator),
     )
     .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let trusted_proxies = state.config.trusted_proxies.clone();
     let product = sensitive
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .with_state(state);
@@ -234,6 +231,10 @@ pub fn router(
         .method_not_allowed_fallback(|| async {
             AppError::new(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed")
         })
+        .layer(axum::middleware::from_fn_with_state(
+            trusted_proxies,
+            xcss::client_ip::middleware,
+        ))
         .layer(axum::middleware::from_fn(log_request))
         .layer(axum::middleware::from_fn(
             xcss::server_cli::request_context_middleware,
@@ -242,8 +243,7 @@ pub fn router(
 
 async fn bootstrap(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: axum::http::HeaderMap,
+    Extension(xcss::client_ip::ClientIp(source)): Extension<xcss::client_ip::ClientIp>,
     ContractJson(request): ContractJson<BootstrapRequest>,
 ) -> Result<Json<BootstrapResponse>, AppError> {
     let authorization_code = request.authorization_code.trim();
@@ -255,11 +255,6 @@ async fn bootstrap(
             "authorization_code, device_name and platform are required",
         ));
     }
-    let source = crate::trusted_proxy::resolve_client_ip(
-        peer.ip(),
-        &headers,
-        &state.config.trusted_proxy_cidrs,
-    )?;
     state.login_admission.check_source(source)?;
     let authorization_hash = Sha256::digest(authorization_code.as_bytes()).to_vec();
     state.login_admission.check_account(&format!(

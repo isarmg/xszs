@@ -15,14 +15,27 @@ fn private(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 fn output(config: &Path, args: &[&str]) -> Output {
-    Command::new(BINARY)
+    use std::io::Write as _;
+    let mut child = Command::new(BINARY)
         .env_clear()
         .args(args)
         .arg("--config")
         .arg(config)
         .arg("--json")
-        .output()
-        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if args.first() == Some(&"init") || args.first() == Some(&"admin") {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"test-password1!\n")
+            .unwrap();
+    }
+    child.wait_with_output().unwrap()
 }
 fn report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
@@ -53,7 +66,9 @@ fn state(path: &Path) -> BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
         }
     }
     let mut result = BTreeMap::new();
-    collect(path, path, &mut result);
+    if path.exists() {
+        collect(path, path, &mut result);
+    }
     result
 }
 struct Running(Child);
@@ -67,18 +82,20 @@ impl Drop for Running {
 fn explicit_initialization_read_only_diagnostics_and_real_readiness() {
     let temporary = tempfile::tempdir().unwrap();
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    let data = temporary.path().join("data");
-    private(&data);
+    let data = temporary.path().join("data %#?");
     let shared = temporary.path().join("shared");
     private(&shared);
     let socket = TcpListener::bind("127.0.0.1:0").unwrap();
     let bind = socket.local_addr().unwrap();
     drop(socket);
     let config = temporary.path().join("config.json");
-    let mut settings = json!({"data_dir":data,"bind":bind.to_string(),"development":true,"require_https":false,"credentials_key":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=","bootstrap_admin_password":"test-password1!"});
+    let mut settings = json!({"data_dir":data,"bind":bind.to_string(),"development":true});
     fs::write(&config, serde_json::to_vec(&settings).unwrap()).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     let empty = state(&data);
+    assert!(output(&config, &["config", "validate"]).status.success());
+    assert!(!output(&config, &["check"]).status.success());
+    assert!(!data.exists());
     for flag in ["--help", "--version"] {
         let result = Command::new(BINARY).env_clear().arg(flag).output().unwrap();
         assert!(result.status.success());
@@ -104,6 +121,7 @@ fn explicit_initialization_read_only_diagnostics_and_real_readiness() {
     assert!(!missing.status.success());
     assert!(report(&missing)["code"].is_string());
     assert_eq!(state(&data), empty, "run initialized an empty directory");
+    assert!(!data.exists(), "run created a missing data directory");
     let invalid = output(&config, &["nonsense"]);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(report(&invalid)["code"].is_string());
@@ -119,6 +137,13 @@ fn explicit_initialization_read_only_diagnostics_and_real_readiness() {
         )
     );
     assert_eq!(report(&initialized)["ready"], false);
+    assert!(data.is_dir(), "init must create a missing data directory");
+    let secrets_path = data.join("secrets.json");
+    let secrets = fs::read(&secrets_path).unwrap();
+    assert_eq!(
+        fs::metadata(&secrets_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     let initialized_state = state(&data);
     assert!(!initialized_state.is_empty());
     let again = output(&config, &["init"]);
@@ -143,7 +168,14 @@ fn explicit_initialization_read_only_diagnostics_and_real_readiness() {
         String::from_utf8_lossy(&valid.stderr)
     );
     let valid_report = report(&valid);
-    assert!(valid_report["schema_identity"].is_object());
+    assert!(valid_report.get("schema_identity").is_none());
+    let checked = output(&config, &["check"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(report(&checked)["schema_identity"].is_object());
     assert!(
         valid_report["state_paths"]
             .as_array()
@@ -270,6 +302,30 @@ fn explicit_initialization_read_only_diagnostics_and_real_readiness() {
             .success()
     );
     assert!(running.0.wait().unwrap().success());
+    assert_eq!(fs::read(&secrets_path).unwrap(), secrets);
+    fs::remove_file(&secrets_path).unwrap();
+    assert!(!output(&config, &["run"]).status.success());
+    assert!(!output(&config, &["check"]).status.success());
+    assert!(
+        !secrets_path.exists(),
+        "run recreated a missing business key"
+    );
+    fs::write(&secrets_path, b"{\"credentials_key\":[7]}").unwrap();
+    fs::set_permissions(&secrets_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(!output(&config, &["run"]).status.success());
+    assert_eq!(
+        fs::read(&secrets_path).unwrap(),
+        b"{\"credentials_key\":[7]}"
+    );
+    fs::write(&secrets_path, &secrets).unwrap();
+    assert!(output(&config, &["check"]).status.success());
+    let reset = output(&config, &["admin", "reset-password", "--username", "admin"]);
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert_eq!(fs::read(&secrets_path).unwrap(), secrets);
     let records = fs::read_dir(data.join("logs"))
         .unwrap()
         .filter_map(Result::ok)
@@ -377,4 +433,37 @@ fn assert_http_error(
     assert!(record["code"].is_string(), "{record}");
     assert_eq!(record["request_id"].as_str(), Some(request_id.as_str()));
     request_id.clone()
+}
+
+#[test]
+fn shared_deployment_contract() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let data = temporary.path().join("state %#?");
+    let config = temporary.path().join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({"data_dir":data})).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    xcss::testkit::assert_deployment_cli_contract(
+        Path::new(BINARY),
+        &config,
+        &data,
+        &["xszs.sqlite3", "secrets.json"],
+    );
+}
+
+#[test]
+fn offline_binary_artifacts_do_not_read_instance_configuration() {
+    let inaccessible = Path::new("/missing-instance/../unused-config.json");
+    for command in ["release-identity", "web-assets"] {
+        let result = output(inaccessible, &[command]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }

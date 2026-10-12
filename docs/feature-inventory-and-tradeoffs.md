@@ -56,7 +56,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
 | MED-A-001 | 控制面只有 Administrator，平台表由 xcss Composer 生成 | `_common_administrators`、Admin Core | 核心 | 高 | 删除认证会公开备份实例与路径 | Session 固定 admin；无产品管理员表 |
-| MED-A-002 | 仅无管理员时使用 BOOTSTRAP_ADMIN_USERNAME/PASSWORD 初始化；已有身份不被环境覆盖 | `build_state`、Admin Core | 保障 | 高 | 环境变量不能隐式重置账户 | 空库要求密码；已有管理员保持不变 |
+| MED-A-002 | 仅显式 `init --username admin` 从 stdin 读取初始密码；已有身份不会被覆盖 | `initialize`、Admin Core | 保障 | 高 | 避免秘密写入配置或环境，避免隐式重置账户 | 空库初始化、已有管理员保持不变 |
 | MED-A-003 | Administrator username 使用 xcss 唯一 canonical 规则：登录 candidate 1..64 printable ASCII，经 trim ASCII + lowercase 后必须为 3..64 bytes、首尾字母数字、字符仅 `[a-z0-9._-]` | `normalize_administrator_username`、`require_canonical_administrator_username`、Schema CHECK | 保障 | 中 | 同一身份可用大小写/空白变体绕过限流或唯一约束，跨项目身份语义会漂移 | 大小写/首尾空白正例；`@`、Unicode、内部空白、控制字符、首尾分隔符和超长负例 |
 | MED-A-004 | 管理员密码只接受 xcss 当前 Argon2id 策略 | Admin Core、Admin Auth | 保障 | 高 | 产品不能另设 hash 分支 | PHC 参数与口令策略负例 |
 | MED-A-005 | 三个浏览器认证入口精确为 `/api/v1/auth/login`、`/api/v1/auth/session`、`/api/v1/auth/logout` | xcss path constants、`routes.rs` | 保障 | 中 | 路径漂移破坏共享客户端；别名扩大攻击面 | method/path 矩阵，合同外路径拒绝 |
@@ -73,8 +73,8 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-A-017 | 移动业务 API 只接受已配对设备的 device token 或未撤销 API Key，解析到同一 account/device context；轮换或撤销实例同步撤销其 API Key | `auth::require_auth` | 核心 | 高 | 旧凭据可能在实例撤销后继续访问，或两个 token 类型产生不同隔离语义 | device/API key、revoked、disabled、跨账户 |
 | MED-A-018 | API Key 原值只在创建响应出现一次，库中存 hash/prefix，可列出和撤销 | `api_access.rs`、`api_keys` | 建议保留 | 高 | 自动化/额外客户端只能保存设备 token；明文保存会泄漏 | 创建、列表不含 token、撤销、last_used |
 | MED-A-019 | `/metrics` 使用与其他身份分离的可选 Bearer `METRICS_TOKEN` | `metrics.rs`、Config | 保障 | 中 | 聚合容量可被公开，或监控被迫保存 Administrator Cookie | 无/错/对 token；空配置语义 |
-| MED-A-020 | 可信代理解析从 socket peer 开始，最多 32 个转发 hop；未可信 peer 的头不生效 | `trusted_proxy.rs` | 保障 | 高 | 登录来源与 HTTPS 判断可被伪造 | trusted/untrusted、XFF 顺序、IPv4-mapped IPv6、超限 |
-| MED-A-021 | 生产要求 HTTPS 语义；开发非 HTTPS 只允许显式 loopback | `require_secure_transport`、`validate_security_mode` | 保障 | 高 | Bearer、Cookie 和媒体元数据可能明文经过不可信网络 | direct/proxy HTTPS、XFP、development bind |
+| MED-A-020 | 可信代理解析从 socket peer 开始，最多 32 个转发 hop；未可信 peer 的头不生效 | `trusted_proxy.rs` | 保障 | 高 | 业务客户端 IP 可被伪造 | trusted/untrusted、XFF 顺序、IPv4-mapped IPv6、超限 |
+| MED-A-021 | TLS 由外部入口负责；生产 Cookie 使用 Secure，X-Forwarded-Proto 不决定传输安全 | `router`、`development` | 保障 | 高 | 安全部署边界必须由入口与防火墙保证 | Cookie 属性、伪造转发头不影响启动/业务 |
 | MED-A-022 | 所有 HTTP 错误统一 xcss `ErrorEnvelope`，429 保留 `Retry-After` | `error.rs`、`xcss::error` | 保障 | 中 | React/移动端需要项目专用错误分支，或内部文本泄漏 | 400/401/403/404/409/429/500 exact keys |
 
 ## 4. 上传协议、配额与对象存储
@@ -159,11 +159,11 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-R-008 | Prometheus 文本只暴露聚合 user/device/resource/bytes/upload 指标 | `metrics.rs` | 开发运维 | 中 | 容量不可监控；若加 labels 不慎会泄漏用户名/路径 | content type、token、无高基数/Secret |
 | MED-R-009 | release identity 绑定 source revision、target、API、encoding、Schema 与 Web bytes | `release.rs` | 保障 | 高 | 二进制与 Web 可混代 | identity JSON/contract hash、单字段篡改 |
 | MED-R-010 | 全树 manifest 精确约束文件、mode、size、SHA，拒绝额外/缺失/链接 | `release.rs`、manifest writer | 保障 | 高 | 安装树内容无法证明 | missing/extra/tamper/symlink/hardlink/mode |
-| MED-R-011 | 正式 binary 只能从规范 release root 用 `run --release-root` 启动；省略 release root 的 `run` 仅允许 unbound 开发 build | `verify_runtime`、`ensure_unbound_development_serve` | 保障 | 高 | source-bound binary 可绕过发行闭包 | physical executable path、wrong root、正式 binary 省略 release root |
+| MED-R-011 | 正式 binary 可从普通安装路径 `run --config PATH`；制品验证为显式离线操作 | `main`、`release` | 保障 | 中 | 运行配置与下载校验保持清晰边界 | 复制 binary 到普通路径后启动、完整制品显式验证 |
 | MED-R-012 | `build-server-release.sh` 只在 Linux AMD64 接受 64-bit little-endian x86_64 ELF | release script | 开发运维 | 中 | 文件名 target 与真实 ELF 可不一致 | ELF magic/class/endian/machine、wrong host |
 | MED-R-013 | 发行包包含 binary、配置样例、`deploy/xszs.service` 映射出的 systemd、脚本、Web 和必要文档 | build script | 开发运维 | 高 | 操作者拿到不完整或跨代部署单元 | expected exact layout、真实 verify-release |
-| MED-R-014 | systemd 使用 `xszs`、flat `/etc/isarmg/xszs.env`、ConditionArchitecture 和 sandbox | `deploy/xszs.service` | 保障 | 高 | 错服务账号、配置路径或权限扩大主机攻击面 | `systemd-analyze verify`、实际 start、write paths |
-| MED-R-015 | 安装 no-clobber 固定 `/opt/isarmg/xszs/releases/1.0.3`，环境 0600 | `setup-wsl.sh`、deployment tests | 保障 | 高 | 同版本覆盖会让运行内容不可追溯，Secret 权限过宽 | 首装/二次安装、concurrent、mode/owner |
+| MED-R-014 | systemd 使用 isarmg-xszs 账户、私有 `/etc/isarmg/xszs/config.json`、RuntimeDirectory 与基于所选状态路径的写入许可 | `deploy/xszs.service`、install.sh | 保障 | 高 | 错账户或权限扩大主机攻击面 | unit 校验、实际 start、写入路径 |
+| MED-R-015 | `install.sh setup CONFIG_JSON [USERNAME]` 安装并执行 init/check，不启动；upgrade 保留配置和状态，按原运行状态恢复 | `install.sh`、deployment tests | 保障 | 高 | 升级误初始化或换密钥破坏实例 | 首装、已有实例拒绝、升级保持密钥/数据库、离线不创建 /run |
 | MED-R-016 | 本仓库 CI 覆盖 Rust、管理 Web、协议与 Server 发行；移动端 CI 属于 Client 仓库 | `.github/workflows`、`scripts/` | 开发运维 | 高 | 任一平台可在 wire/FFI 漂移时独立发布 | clean checkout jobs、平台矩阵、lock mode |
 | MED-R-017 | Rust 固定 1.99.0；Web Node/toolchain 与 Cargo/npm locks 均固定 | toolchain/version/lock files | 开发运维 | 中 | 解析随时间变化，制品难复现 | `--locked`、`npm ci`、version output |
 | MED-R-018 | 中文 README、学习、流程、功能取舍和运维文档是发行/维护闭包 | `README.md`、`docs/` | 开发运维 | 低 | 跨五种语言/平台的知识只能口头传递 | 链接、命令、代码锚点和 schema hash 抽查 |

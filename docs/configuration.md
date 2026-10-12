@@ -1,67 +1,25 @@
-# 配置参考
+# 配置
 
-生产安装使用 root 拥有、权限 `0600` 的 `/etc/isarmg/xszs.env`。先用安装器生成，再审阅实际值。
+默认文件 `/etc/isarmg/xszs/config.json`，归 `isarmg-xszs:isarmg-xszs` 所有，文件 `0600`、父目录 `0700`。默认文件缺失可使用环境变量和默认值；显式 `--config` 文件缺失、不安全或配置错误则失败。
 
-## 配置项
+优先级：CLI > `XSZS_` 环境变量 > JSON > 默认值。未知、重复和错误字段会被拒绝，无旧变量别名。
 
-| 变量 | 默认示例或语义 | 生产约束 |
+| JSON | 环境变量 | 默认值 |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///var/lib/isarmg/xszs/db/app.db` | 必须指向当前 SQLite；父目录链不得用链接代换 |
-| `DATA_DIR` | `/var/lib/isarmg/xszs/data` | 必须与发行树分离；持续监控容量和 inode |
-| `BIND` | `127.0.0.1:8080` | 推荐仅监听 loopback，由反向代理对外提供 TLS |
-| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | 仅由显式 init 创建初始身份；已有身份不被覆盖 |
-| `BOOTSTRAP_ADMIN_PASSWORD` | 安装时随机生成 | 仅初始化时必填；已有管理员时不会重置其密码 |
-| `XSZS_CREDENTIALS_KEY` | 32 bytes 随机值的 Base64 | 必填且必须持久化；用于实例授权码信封加密，不得与其他 Token/密码复用 |
-| `MAX_PART_BYTES` | `67108864` | 单上传分块上限；同时影响请求 body 上限和内存/并发压力 |
-| `UPLOAD_GLOBAL_CONCURRENCY` | 未配置时 `16` | 正整数；限制全局并行上传处理 |
-| `UPLOAD_PER_ACCOUNT_CONCURRENCY` | 未配置时 `4` | 正整数且不得大于全局值 |
-| `REQUIRE_HTTPS` | `true` | 生产必须为 `true` |
-| `DEVELOPMENT` | `false` | 生产必须为 `false`；为 `true` 时只允许 loopback bind |
-| `TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | 只填写会直接连接 Server 的真实可信代理地址或网段 |
-| `METRICS_TOKEN` | 安装时随机生成 | 独立 Bearer Token；空值会关闭 `/metrics` |
-| `RUST_LOG` | `xszs=info,tower_http=info` | 控制日志级别；不要开启会泄露敏感数据的临时调试日志 |
+| bind | XSZS_BIND | 127.0.0.1:8080 |
+| data_dir | XSZS_DATA_DIR | /var/lib/isarmg/xszs |
+| development | XSZS_DEVELOPMENT | false |
+| log_level | XSZS_LOG_LEVEL | info（error/warn/info/debug/trace） |
+| trusted_proxies | XSZS_TRUSTED_PROXIES | []（环境值为 JSON 数组，元素是 IP/CIDR） |
 
-## 管理员与设备凭据
+`--config`、`--data-dir`、`--bind`、`--development true|false` 为全局参数，可放在子命令前后。development=true 仅允许 loopback 监听。
 
-Server 与管理 Web 只有一个角色：`admin`。不存在访客、普通后台角色或邮箱登录。
+所有内部状态都在 data_dir：`xszs.sqlite3`、`secrets.json`、`logs/` 和锁文件。无单独 database_url。init 在空实例中自动生成业务密钥并以 0600 原子写入 secrets.json；run/check 只读，缺失或损坏时拒绝，不自动补建。升级保留整个状态目录。管理员密码只在 init 或 admin reset-password 的 stdin 中传入。
 
-- 登录请求精确为 `{username,password}`。
-- 登录候选 username 长度为 1–64 bytes，必须是可打印 ASCII；规范化会去除首尾 ASCII 空白并转为
-  ASCII 小写。
-- 规范化后的 canonical username 长度为 3–64 bytes，首尾必须是字母或数字，中间字符只允许
-  `[a-z0-9._-]`。
-- `@`、Unicode、内部空白、控制字符和首尾分隔符均被拒绝。
-- 管理员密码必须为 12–1024 bytes，且不得包含 ASCII 控制字符。
-- 管理员浏览器 Session 与移动备份账户、设备 Bearer Token、API Key 是相互隔离的身份域；不得把
-  `BOOTSTRAP_ADMIN_USERNAME` 当作移动账户配置，也不得复制凭据实现“兼容”。
+日志使用公共 xcss UTC 结构化日志与 logs/ 轮转。生产 HTTPS 由入口负责，管理员认证继续检查 Host/Origin 并设置 Secure Cookie。trusted_proxies 仅控制客户端 IP：默认忽略转发头，只有可信直连代理才按链解析；不会改变 TLS 或认证语义。
 
-## HTTPS 代理
+`config validate` 只检查配置，无需初始化；`check` 离线检查状态；`status` 查询在线 readiness。
 
-生产流量应为：
+`storage_dir` / `XSZS_STORAGE_DIR` 可单独指定媒体目录，默认 data_dir/media；只放业务媒体，SQLite、密钥及日志仍在 data_dir。setup 为选定的空媒体目录建立服务账户权限，并在 systemd drop-in 中授予 data_dir 和 storage_dir 写权限。后续调整路径时先停服、准备已有媒体/状态及权限，再执行 upgrade 更新写入许可。
 
-```text
-浏览器或移动客户端
-        │ HTTPS
-        ▼
-可信反向代理
-        │ HTTP，仅同机 loopback 或受控私网
-        ▼
-127.0.0.1:8080 xszs
-```
-
-最小 Caddy 示例：
-
-```caddyfile
-media.example.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-代理必须覆盖而不是盲目信任客户端传入的转发头，并正确传递 HTTPS 语义。Server 只在 socket peer
-落入 `TRUSTED_PROXY_CIDRS` 时信任对应转发信息。把互联网网段或任意客户端地址加入该列表会使攻击者
-伪造来源或安全协议；不要为了消除 4xx 而放宽为全网段。
-
-防火墙必须阻止外部客户端绕过代理直接访问 Server。TLS 证书、私钥、HSTS 和公网访问控制由反向代理
-负责，但 Server 仍会在业务入口强制验证安全传输语义。
-
-严格 JSON、CLI 优先级和只读校验见[服务命令](cli.md)。同一服务始终使用同一组数据库、媒体目录和加密密钥。修改后在维护窗口重启，并检查 `status` 与真实 HTTPS 登录。
+上传参数保留 max_part_bytes（默认67108864）、upload_global_concurrency（16）、upload_per_account_concurrency（4）；可用对应 XSZS_ 大写变量覆盖。metrics_token 为可选独立监控访问令牌。development_web_dir / XSZS_DEVELOPMENT_WEB_DIR 仅允许开发构建使用。

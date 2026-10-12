@@ -52,13 +52,13 @@ struct TreeBudget {
 }
 
 pub(crate) fn run(config: &Config) -> anyhow::Result<DoctorSummary> {
-    let lock = RuntimeLock::acquire(&config.database_url, &config.data_dir)?;
+    let lock = RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
     let database = database::database_path(&config.database_url)?;
     database::validate_current_database(&database)?;
     database::integrity_and_foreign_key_check(&database)?;
     database_write_rollback_probe(&lock)?;
-    storage_write_cleanup_probe(&config.data_dir)?;
-    let files = index_data_tree(&config.data_dir)?;
+    storage_write_cleanup_probe(&config.storage_dir)?;
+    let files = index_data_tree(&config.storage_dir)?;
     let (blobs, uploads) = validate_database_files(&database, &files)?;
     lock.verify_original_paths()?;
     Ok(DoctorSummary {
@@ -797,18 +797,17 @@ mod tests {
         pool.close().await;
         let config = Config {
             database_url,
-            data_dir: data,
+            data_dir: temporary.path().to_path_buf(),
+            storage_dir: data,
+            log_level: "info".into(),
             bind: "127.0.0.1:0".parse().unwrap(),
-            bootstrap_admin_username: "doctor-admin".to_owned(),
-            bootstrap_admin_password: Some("doctor-password".to_owned()),
             max_part_bytes: 1024 * 1024,
             upload_global_concurrency: 16,
             upload_per_account_concurrency: 4,
             metrics_token: None,
-            require_https: false,
             development: true,
-            trusted_proxy_cidrs: Vec::new(),
-            credentials_key: [7; 32],
+            development_web_dir: None,
+            trusted_proxies: xcss::client_ip::TrustedProxies::parse(&[]).unwrap(),
             sources: Default::default(),
         };
 
