@@ -1077,7 +1077,7 @@ mod tests {
                 response.headers()[header::X_CONTENT_TYPE_OPTIONS],
                 "nosniff"
             );
-            let body = axum::body::to_bytes(response.into_body(), 512 * 1024)
+            let body = axum::body::to_bytes(response.into_body(), bytes.len())
                 .await
                 .unwrap();
             assert_eq!(body.as_ref(), bytes);
