@@ -21,16 +21,20 @@ Session 是固定平台策略，不提供产品级 TTL 配置。管理员登录�
 设备数量因此有界；不是在内存中截断其他设备。列表与详情响应预算为 1 MiB、时限 10 秒，错误/空页
 与真正零实例分别表达，超出 JavaScript 精确整数范围的统计明确失败，不截断或重写存量数据。
 
-管理 Web 的日志页使用 Server 本地时区的日历日期。`GET /api/v1/admin/logs` 返回
-`{date,instance_id,logs,previous_cursor,next_cursor}`；多日范围还包含 `end_date`，省略日期时默认 Server 当天。
+管理 Web 的日志页使用 UTC 日历日期。`GET /api/v1/admin/logs` 返回
+`{date,instance_id,logs,previous_cursor,next_cursor}`；多日范围还包含 `end_date`，省略日期时默认 UTC 当天。
 单日使用 `?date=YYYY-MM-DD`，范围使用 `?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`，
 包含起止当天，不能与 `date` 混用；`&instance_id=UUID` 按实例筛选。每页最多 50 条，按审计序号倒序，
 使用返回的 `cursor` 继续翻页；翻页必须携带相同的显式日期或范围，游标与范围/实例不一致会被拒绝。
 实例筛选覆盖设备 actor、属于设备的 API Key actor 及管理员 device entity，不按共同 account 猜测。
 从实例详细信息进入日志会保留该实例上下文，“全部实例”恢复全局日志；刷新返回第一页。
-日期边界由两个本地午夜分别换算为 UTC，夏令时日仍按完整日历日筛选；展示时间附 UTC 偏移。
+日期边界为 UTC 午夜，每天固定 24 小时；展示时间使用带 `Z` 标识的 UTC 时间。
 浏览器单页响应预算 1 MiB、时限 10 秒，不积累历史页。账户级 `GET /v1/audit-events` 保持独立
 账户授权及分页合同。结构化请求跨度和提交后实例事件提供稳定 instance_id，可独立分析。
+
+上传并发默认全局 16、每账号 4；等候账号配额的请求不占用其他账号可用的全局名额。
+预览解码最多并发 2 个任务，取消页面请求后，已开始的解码仍占用名额直到实际结束。
+缓存命中的预览也先经过同一并发入口。上述限制是运行预算，不代表实测吞吐或内存使用量。
 
 Android/iOS 只向 `/v1/auth/bootstrap` 提交服务器地址、实例授权码和设备信息。授权码在管理员直接新建备份实例时生成，服务端保存密文和独立查找摘要；更换授权码会清除旧设备 Token 并要求重新配对。客户端以实例授权码配对；Server 启动时校验当前 Schema。
 

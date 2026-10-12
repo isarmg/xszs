@@ -29,10 +29,9 @@ export function actionLabel(value: string): string {
   const label = Object.hasOwn(actions, value) ? actions[value] : undefined;
   return label ? t(...label) : t("未识别的操作", "Unrecognized action");
 }
-/** SQLite datetime('now') values are UTC even though they omit a zone suffix. */
 export function lastSeen(value: string | null | undefined): string {
   if (!value) return t("尚未配对", "Not paired yet");
-  const instant = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? value.replace(" ", "T") + "Z" : value;
-  const date = new Date(instant);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString(getLocale()) : t("未知", "Unknown");
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return t("未知", "Unknown");
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? `${date.toLocaleString(getLocale(), { timeZone: "UTC", hourCycle: "h23" })} UTC` : t("未知", "Unknown");
 }

@@ -2945,7 +2945,7 @@ async fn gallery_filters_snapshot_previews_and_streaming_preserve_account_bounda
 }
 
 #[tokio::test]
-async fn administrator_logs_page_every_event_on_the_selected_server_day() {
+async fn administrator_logs_page_every_event_on_the_selected_utc_day() {
     let workspace = TestWorkspace::new();
     let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
     let app = test_router(state).await;
@@ -2988,7 +2988,7 @@ async fn administrator_logs_page_every_event_on_the_selected_server_day() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let today: String = sqlx::query_scalar("SELECT date('now', 'localtime')")
+    let today: String = sqlx::query_scalar("SELECT date('now')")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3015,7 +3015,7 @@ async fn administrator_logs_page_every_event_on_the_selected_server_day() {
         ("boundary.start", today.as_str(), "00:00:00"),
         ("boundary.next", tomorrow.as_str(), "00:00:00"),
     ] {
-        let occurred_at: String = sqlx::query_scalar("SELECT datetime(?1 || ' ' || ?2, 'utc')")
+        let occurred_at: String = sqlx::query_scalar("SELECT datetime(?1 || ' ' || ?2)")
             .bind(date)
             .bind(time)
             .fetch_one(&pool)
@@ -3084,11 +3084,10 @@ async fn administrator_logs_page_every_event_on_the_selected_server_day() {
                 > logs[1]["sequence"].as_i64().unwrap()),
         "same-time events must not repeat or disappear"
     );
-    assert!(
-        all_logs
-            .iter()
-            .all(|log| log["occurred_at"].as_str().unwrap().starts_with(&today))
-    );
+    assert!(all_logs.iter().all(
+        |log| log["occurred_at"].as_str().unwrap().starts_with(&today)
+            && log["occurred_at"].as_str().unwrap().ends_with('Z')
+    ));
     assert!(all_logs.iter().any(|log| log["action"] == "bulk.0"));
     assert!(all_logs.iter().any(|log| log["action"] == "boundary.start"));
     assert!(
@@ -3546,4 +3545,91 @@ async fn administrator_instance_pages_keep_global_statistics_and_direct_details(
         persisted, max_exact,
         "an unrepresentable aggregate is rejected without rewriting data"
     );
+}
+
+#[tokio::test]
+async fn repeated_and_concurrent_tag_creates_reuse_identity_without_duplicate_events() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account, device) = seed_account(&pool, "blobs/tag-reuse", "tag-reuse").await;
+    let token = "tag-reuse-device-token";
+    sqlx::query("UPDATE devices SET token_hash=? WHERE id=?")
+        .bind(sha2::Sha256::digest(token.as_bytes()).to_vec())
+        .bind(device)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = test_router(state.clone()).await;
+    let post = |name: &str| {
+        json_request(
+            Method::POST,
+            "/v1/tags",
+            json!({"name":name}),
+            Some(token),
+            None,
+        )
+    };
+    let first = json_body(send(&app, post("Holiday"), StatusCode::CREATED).await).await;
+    let repeated = json_body(send(&app, post("Holiday"), StatusCode::OK).await).await;
+    assert_eq!(first["tag_id"], repeated["tag_id"]);
+    let (left, right) = tokio::join!(
+        app.clone().oneshot(post("Concurrent")),
+        app.clone().oneshot(post("Concurrent"))
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert!(matches!(
+        (left.status(), right.status()),
+        (StatusCode::CREATED, StatusCode::OK) | (StatusCode::OK, StatusCode::CREATED)
+    ));
+    assert_eq!(
+        json_body(left).await["tag_id"],
+        json_body(right).await["tag_id"]
+    );
+    let counts:(i64,i64,i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM tags WHERE account_id=?1), (SELECT COUNT(*) FROM account_changes WHERE account_id=?1 AND entity_kind='tag'), (SELECT COUNT(*) FROM audit_events WHERE account_id=?1 AND action='tag.create')")
+        .bind(account).fetch_one(&pool).await.unwrap();
+    assert_eq!(counts, (2, 2, 2));
+    drop(app);
+    close_test_state(state, pool).await;
+}
+
+#[tokio::test]
+async fn upload_manifest_http_budget_accepts_max_parts_and_rejects_oversized_body() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (_, device) = seed_account(&pool, "blobs/manifest-budget", "manifest-budget").await;
+    let token = "manifest-budget-device-token";
+    sqlx::query("UPDATE devices SET token_hash=? WHERE id=?")
+        .bind(sha2::Sha256::digest(token.as_bytes()).to_vec())
+        .bind(device)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = test_router(state.clone()).await;
+    let manifest = json!({"source_asset_id":"asset","source_resource_id":"original","media_kind":"photo","role":"primary",
+        "filename":"photo.jpg","mime_type":"image/jpeg","source_created_at_ms":0,"storage_encoding":"plain-v1",
+        "content_size":4096,"content_blake3":"a".repeat(64),"metadata":{"description":"x".repeat(64*1024-32)},
+        "parts":(0..4096).map(|index|json!({"index":index,"size":1,"blake3":"b".repeat(64)})).collect::<Vec<_>>()});
+    assert!(serde_json::to_vec(&manifest).unwrap().len() > 64 * 1024);
+    let accepted = json_body(
+        send(
+            &app,
+            json_request(Method::POST, "/v1/uploads", manifest, Some(token), None),
+            StatusCode::OK,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(accepted["missing_parts"].as_array().unwrap().len(), 4096);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/uploads")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(vec![b' '; 1024 * 1024 + 1]))
+        .unwrap();
+    let rejected = json_body(send(&app, request, StatusCode::PAYLOAD_TOO_LARGE).await).await;
+    assert_eq!(rejected["retryable"], false);
+    drop(app);
+    close_test_state(state, pool).await;
 }

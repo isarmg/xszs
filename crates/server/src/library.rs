@@ -599,19 +599,39 @@ pub async fn create_tag(
 ) -> Result<(StatusCode, Json<TagRecord>), AppError> {
     validate_name("tag", &request.name)?;
     let mut transaction = state.pool.begin().await?;
-    let row = sqlx::query(
+    let created = sqlx::query(
         r#"
         INSERT INTO tags(id, account_id, name, created_at, updated_at)
         VALUES (?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(account_id, name) DO NOTHING
         RETURNING id, name, 0 AS asset_count,
                   (CAST(strftime('%s', updated_at) AS INTEGER) * 1000) AS updated_at_ms
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(auth.account_id)
-    .bind(request.name)
-    .fetch_one(&mut *transaction)
+    .bind(&request.name)
+    .fetch_optional(&mut *transaction)
     .await?;
+    let Some(row) = created else {
+        // A concurrent creator or a repeated add reuses the same account tag.
+        // Do not emit a second create event or pretend the name was invalid.
+        let row = sqlx::query(
+            "SELECT t.id,t.name,COUNT(a.id) AS asset_count, \
+             CAST(strftime('%s',t.updated_at) AS INTEGER)*1000 AS updated_at_ms \
+             FROM tags t LEFT JOIN tag_assets ta ON ta.tag_id=t.id \
+             LEFT JOIN assets a ON a.id=ta.asset_id AND a.deleted_at IS NULL \
+             AND EXISTS(SELECT 1 FROM resources r WHERE r.asset_id=a.id) \
+             WHERE t.account_id=? AND t.name=? GROUP BY t.id",
+        )
+        .bind(auth.account_id)
+        .bind(&request.name)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let tag = tag_from_row(row);
+        transaction.commit().await?;
+        return Ok((StatusCode::OK, Json(tag)));
+    };
     let tag = tag_from_row(row);
     audit::record_change(
         &mut transaction,

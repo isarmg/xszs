@@ -84,7 +84,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-U-001 | 唯一移动 HTTP base 为 `/v1`，上传 DTO 使用 `deny_unknown_fields` | `crates/protocol`、`routes.rs` | 核心 | 高 | 三端 wire 漂移或歧义 JSON 被接受 | 全 DTO 正反 fixture、合同外 route |
 | MED-U-002 | create upload 明确声明 source IDs、media kind、资源 role、文件名、MIME、时间、encoding、总 Hash/size、metadata 和 parts | `CreateUploadRequest` | 核心 | 高 | Server 无法重建资产/资源或校验完整性 | 每字段缺失/类型/unknown、完整 round trip |
 | MED-U-003 | 只接受 `plain-v1` storage encoding | `StorageEncoding`、Schema CHECK | 保障 | 高 | 多 encoding 会要求下载、doctor 和恢复分支 | 非当前枚举拒绝；DB CHECK |
-| MED-U-004 | manifest body 最大 64 KiB，普通 JSON 最大 256 KiB，metadata 最大 64 KiB | `routes::router`、`validate_upload_request` | 保障 | 中 | 超大 manifest/metadata 可耗尽内存和 DB | 边界、超限、非法 JSON、连接恢复 |
+| MED-U-004 | manifest body 最大 1 MiB（最多 4096 块），普通 JSON 最大 256 KiB，metadata 最大 64 KiB | `routes::router`、`validate_upload_request` | 保障 | 中 | 超大 manifest/metadata 可耗尽内存和 DB | 边界、超限、非法 JSON、连接恢复 |
 | MED-U-005 | parts 必须从 0 连续编号、非空、每块不超过 `MAX_PART_BYTES`，sizes 总和等于 content size | `validate_upload_request` | 保障 | 高 | 缺块、重叠或溢出会导致错误拼装 | 空文件、零块、gap、overflow、超大 part |
 | MED-U-006 | 每块和完整对象使用 64 hex BLAKE3 | Client `crates/crypto`、Server storage/commit | 保障 | 高 | 传输损坏、错序和去重碰撞无法被当前流程识别 | 大小写 hex、错误 part、错误 full hash、篡改 |
 | MED-U-007 | create upload 对相同账户内容先检查已有 blob，文件与 size/full hash 均匹配才去重 | `create_upload`、`inspect_object` | 核心 | 高 | 相同媒体重复占空间；只信 DB 会复用损坏文件 | 同账户正例、跨账户隔离、DB/file mismatch |
@@ -115,7 +115,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-L-006 | trash/restore 通过明确动作改变 deleted_at；普通列表隐藏 trash | `trash_asset`、`restore_asset` | 建议保留 | 高 | 只能直接永久删或永不删除，误删保护下降 | 重复动作、timeline trashed、change event |
 | MED-L-007 | 永久删除只允许 trashed asset；先在同一事务删除 asset/resource、写 change/audit，让无引用 blob 行成为 durable 回收意图，再以 rooted unlink 与 blob-row DELETE 的同一 SQLite 事务收口。物理回收完成返回 204，仍待协调返回 202 | `delete_asset_permanently`、`reconcile_orphan_blobs` | 保障 | 高 | 可绕过回收步骤、误删仍被其他 resource 引用的 blob，或在 unlink 失败后留下数据库无法追踪的对象 | 非 trash、最后/非最后引用、unlink 失败回滚保留行、202、启动/120 秒/`reconcile scan` 重试、commit-after-unlink failure |
 | MED-L-008 | 相册按 account+device+source_album_id 同步，支持 replace_members 显式语义 | `sync_album`、Android/iOS scanner | 建议保留 | 高 | 设备相册关系无法保留；错误 replace 会删掉未扫描成员 | full/limited scan、空 album、不同 device |
-| MED-L-009 | 标签按账户唯一，支持创建、全量 set、单 asset add/remove | `tags`、`tag_assets` routes | 可选 | 中 | 核心备份不受影响，但人工整理能力下降 | 名称边界、跨账户 ID、重复关系 |
+| MED-L-009 | 标签按账户唯一，同名创建幂等复用（首次 201，已有 200），支持创建、全量 set、单 asset add/remove | `tags`、`tag_assets` routes | 可选 | 中 | 核心备份不受影响，但人工整理能力下降 | 名称边界、跨账户 ID、重复关系 |
 | MED-L-010 | duplicate groups 按账户内 content BLAKE3+size，limit 1–200 | `duplicate_groups` | 可选 | 中 | 无法发现字节相同媒体；仍不会做视觉相似判断 | 同/异账户、同 hash/size、分页上限 |
 | MED-L-011 | resource list 最多返回 1000 条；manifest 给出内容路径与 part 规格 | `list_resources`、`ResourceManifest` | 建议保留 | 中 | 简单客户端无法批量检查远端资源 | 上限、排序、账户隔离、metadata |
 | MED-L-012 | audit_events 使用 account sequence，记录 device/API key 动作但不保存 token/媒体正文 | `audit.rs`、`api_access::audit_events` | 建议保留 | 中 | 数据面操作难追踪 | actor kind/id、limit 1–500、敏感字段负例 |

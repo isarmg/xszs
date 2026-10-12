@@ -36,6 +36,9 @@ use crate::{
     upload_commit,
 };
 
+// A legal 4096-part manifest plus bounded metadata fits this budget.
+const UPLOAD_MANIFEST_BODY_LIMIT: usize = 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub web_directory: Option<Arc<xcss::web_assets::DirectoryAssets>>,
@@ -89,8 +92,10 @@ impl UploadAdmission {
             }
         };
         let wait = async {
-            let global = self.global.clone().acquire_owned().await;
+            // A request waiting for its own account must not occupy a slot
+            // that another account could use for actual I/O.
             let account = account.acquire_owned().await;
+            let global = self.global.clone().acquire_owned().await;
             match (global, account) {
                 (Ok(global), Ok(account)) => Ok(UploadPermit {
                     _global: global,
@@ -113,7 +118,6 @@ pub fn router(
     runtime: xcss::server_runtime::RuntimeHandle,
 ) -> Result<Router, AppError> {
     const JSON_BODY_LIMIT: usize = 256 * 1024;
-    const UPLOAD_MANIFEST_BODY_LIMIT: usize = 64 * 1024;
     let max_part_bytes = state.config.max_part_bytes;
     let protected = Router::new()
         .route(
@@ -640,6 +644,11 @@ fn validate_upload_request(
         || request.mime_type.is_empty()
         || !is_blake3(&request.content_blake3)
         || request.parts.is_empty()
+        || request.parts.len() > 4096
+        || request.source_asset_id.len() > 4096
+        || request.source_resource_id.len() > 4096
+        || request.role.is_empty()
+        || request.role.len() > 64
         || request.filename.len() > 1024
         || request.mime_type.len() > 255
         || request.metadata.as_ref().is_some_and(|value| {
@@ -860,4 +869,101 @@ async fn log_request(
     }
     .instrument(span)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mobile_manifest_budget_accepts_4096_parts_and_rejects_overflow() {
+        let mut request: CreateUploadRequest = serde_json::from_value(serde_json::json!({
+            "source_asset_id":"asset", "source_resource_id":"resource", "media_kind":"photo",
+            "role":"primary", "filename":"photo.jpg", "mime_type":"image/jpeg", "source_created_at_ms":0,
+            "storage_encoding":"plain-v1", "content_size":4096, "content_blake3":"a".repeat(64),
+            "metadata":{"description":"x".repeat(64 * 1024 - 32)},
+            "parts":(0..4096).map(|index| serde_json::json!({"index":index,"size":1,"blake3":"b".repeat(64)})).collect::<Vec<_>>()
+        })).unwrap();
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert!(
+            bytes.len() > 64 * 1024,
+            "exercise the old body-limit failure"
+        );
+        assert!(bytes.len() <= UPLOAD_MANIFEST_BODY_LIMIT);
+        validate_upload_request(&request, 16 * 1024 * 1024).unwrap();
+        request.parts.push(xszs_protocol::UploadPartSpec {
+            index: 4096,
+            size: 1,
+            blake3: "b".repeat(64),
+        });
+        request.content_size += 1;
+        assert_eq!(
+            validate_upload_request(&request, 16 * 1024 * 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        request.parts.truncate(1);
+        request.content_size = 16 * 1024 * 1024 + 1;
+        request.parts[0].size = request.content_size;
+        assert_eq!(
+            validate_upload_request(&request, 16 * 1024 * 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_account_does_not_reserve_another_accounts_upload_slot() {
+        let admission = UploadAdmission::new(2, 1);
+        let account = Uuid::new_v4();
+        let first = admission.acquire(account).await.unwrap();
+        {
+            let waiting = admission.acquire(account);
+            tokio::pin!(waiting);
+            assert!(
+                timeout(std::time::Duration::from_millis(20), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(admission.global.available_permits(), 1);
+            let other = timeout(
+                std::time::Duration::from_secs(1),
+                admission.acquire(Uuid::new_v4()),
+            )
+            .await
+            .expect("an idle account must be able to use the remaining slot")
+            .unwrap();
+            drop(other);
+        }
+        drop(first);
+        assert_eq!(admission.global.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_global_wait_releases_the_account_admission() {
+        let admission = UploadAdmission::new(1, 1);
+        let first = admission.acquire(Uuid::new_v4()).await.unwrap();
+        let other_account = Uuid::new_v4();
+        {
+            let waiting = admission.acquire(other_account);
+            tokio::pin!(waiting);
+            assert!(
+                timeout(std::time::Duration::from_millis(20), &mut waiting)
+                    .await
+                    .is_err()
+            );
+        }
+        drop(first);
+        let other = timeout(
+            std::time::Duration::from_secs(1),
+            admission.acquire(other_account),
+        )
+        .await
+        .expect("cancelled requests must release account capacity")
+        .unwrap();
+        drop(other);
+        assert_eq!(admission.global.available_permits(), 1);
+    }
 }

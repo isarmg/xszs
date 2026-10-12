@@ -71,7 +71,7 @@ try {
   for (const engine of [chromium, firefox]) {
     const browser = await engine.launch();
     try {
-      const context = await browser.newContext({ locale: "zh-CN", timezoneId: "America/Los_Angeles", viewport: { width: 390, height: 844 } });
+      const context = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", viewport: { width: 390, height: 844 } });
       const page = await context.newPage(), errors = [], mutations = [];
       const logQueries = [], overviewQueries = [], detailQueries = [];
       let users = [backupUser()], failCreate = true, failRotate = true, failDelete = true, oversizeNextLog = false;

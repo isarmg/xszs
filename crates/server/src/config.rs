@@ -76,8 +76,8 @@ impl Config {
             xcss::admin_auth::validate_password(password)?;
         }
         anyhow::ensure!(
-            settings.max_part_bytes > 0,
-            "max_part_bytes must be positive"
+            (16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes),
+            "max_part_bytes must be between 16 MiB and 64 MiB to support mobile uploads"
         );
         anyhow::ensure!(
             settings.upload_global_concurrency > 0 && settings.upload_per_account_concurrency > 0,
@@ -325,8 +325,10 @@ fn validate_intrinsic(
     if let Some(url) = &settings.database_url {
         crate::database::database_path(url).map_err(|_| invalid("/database_url"))?;
     }
+    if !(16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes) {
+        return Err(invalid("/max_part_bytes"));
+    }
     for (path, value) in [
-        ("/max_part_bytes", settings.max_part_bytes),
         (
             "/upload_global_concurrency",
             settings.upload_global_concurrency,
@@ -356,6 +358,40 @@ fn validate_intrinsic(
 #[cfg(test)]
 mod precedence_contract_tests {
     use super::*;
+    #[test]
+    fn mobile_part_budget_is_validated_in_each_configuration_layer() {
+        for value in [0, 1, 16 * 1024 * 1024 - 1, 64 * 1024 * 1024 + 1] {
+            let mut settings = Settings::default();
+            settings.max_part_bytes = value;
+            assert_eq!(
+                validate_intrinsic(&settings, ConfigSource::File)
+                    .unwrap_err()
+                    .path,
+                "/max_part_bytes"
+            );
+        }
+        for value in [16 * 1024 * 1024, 64 * 1024 * 1024] {
+            let mut settings = Settings::default();
+            settings.max_part_bytes = value;
+            validate_intrinsic(&settings, ConfigSource::File).unwrap();
+        }
+        let file = serde_json::to_vec(&serde_json::json!({"max_part_bytes": 1})).unwrap();
+        let error = xcss::config::resolve_validated(
+            &Settings::default(),
+            Some(&file),
+            &[],
+            &[Override::new(
+                "/max_part_bytes",
+                serde_json::json!(64 * 1024 * 1024),
+            )],
+            validate_intrinsic,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.path, "/max_part_bytes");
+        assert_eq!(error.source, ConfigSource::File);
+    }
+
     #[test]
     fn a_higher_priority_override_cannot_hide_an_invalid_file_value() {
         let file = serde_json::to_vec(&serde_json::json!({"upload_global_concurrency":0})).unwrap();

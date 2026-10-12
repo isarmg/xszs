@@ -129,12 +129,37 @@ pub async fn content(
     Ok(response)
 }
 
-static PREVIEW_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static PREVIEW_WORK: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)));
 struct CachedPreview {
     key: String,
     bytes: Vec<u8>,
 }
 static PREVIEWS: std::sync::Mutex<Vec<CachedPreview>> = std::sync::Mutex::new(Vec::new());
+
+async fn run_preview_worker<T, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    work: F,
+) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        // The blocking decoder continues after its HTTP waiter is cancelled.
+        // Keep admission until that decoder has actually finished.
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| AppError::conflict("preview worker failed"))?
+    .map_err(|_| {
+        AppError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "image format or dimensions unsupported; use original",
+        )
+    })
+}
 
 pub async fn preview(
     State(state): State<AppState>,
@@ -165,8 +190,9 @@ pub async fn preview(
     {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        let _permit = PREVIEW_WORK
-            .acquire()
+        let permit = PREVIEW_WORK
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| AppError::conflict("preview worker unavailable"))?;
         let cached = {
@@ -182,7 +208,7 @@ pub async fn preview(
                 .await?
                 .into_std()
                 .await;
-            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let bytes = run_preview_worker(permit, move || -> Result<Vec<u8>, String> {
                 use image::ImageDecoder;
                 let mut reader = image::ImageReader::new(std::io::BufReader::new(file))
                     .with_guessed_format()
@@ -204,14 +230,7 @@ pub async fn preview(
                     .map_err(|e| e.to_string())?;
                 Ok(bytes)
             })
-            .await
-            .map_err(|_| AppError::conflict("preview worker failed"))?
-            .map_err(|_| {
-                AppError::new(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "image format or dimensions unsupported; use original",
-                )
-            })?;
+            .await?;
             let mut cache = PREVIEWS.lock().unwrap_or_else(|p| p.into_inner());
             cache.push(CachedPreview {
                 key: key.clone(),
@@ -238,6 +257,54 @@ pub async fn preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_preview_waiter_keeps_the_running_decoder_admitted() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let (started, began) = tokio::sync::oneshot::channel();
+        let (finish, wait_finish) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(run_preview_worker(permit, move || {
+            started.send(()).unwrap();
+            wait_finish.recv().unwrap();
+            Ok(vec![1_u8])
+        }));
+        began.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(slots.available_permits(), 0);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                slots.clone().acquire_owned(),
+            )
+            .await
+            .is_err()
+        );
+        finish.send(()).unwrap();
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            slots.clone().acquire_owned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(permit);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_preview_decode_releases_its_admission() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        assert!(
+            run_preview_worker::<Vec<u8>, _>(permit, || Err("invalid image".into()))
+                .await
+                .is_err()
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
+
     #[test]
     fn byte_ranges_cover_seek_suffix_and_rejection() {
         assert_eq!(range("bytes=2-5", 10), Ok((2, 4)));

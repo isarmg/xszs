@@ -54,4 +54,4 @@ if grep -Fqx "$marker" "$config"; then
 fi
 
 systemctl start xszs.service
-exec journalctl --unit xszs.service --follow
+exec journalctl --utc --unit xszs.service --follow

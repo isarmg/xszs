@@ -139,31 +139,6 @@ fn valid_calendar_date(date: &str) -> bool {
     year > 0 && (1..=days).contains(&day)
 }
 
-fn server_local_time(local: String, utc_offset_seconds: i64) -> Result<String, AppError> {
-    if utc_offset_seconds.unsigned_abs() > 24 * 3600 {
-        return Err(AppError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server time offset is invalid",
-        ));
-    }
-    let sign = if utc_offset_seconds < 0 { '-' } else { '+' };
-    let minutes = utc_offset_seconds.unsigned_abs() / 60;
-    let seconds = utc_offset_seconds.unsigned_abs() % 60;
-    if seconds == 0 {
-        Ok(format!(
-            "{local} {sign}{:02}:{:02}",
-            minutes / 60,
-            minutes % 60
-        ))
-    } else {
-        Ok(format!(
-            "{local} {sign}{:02}:{:02}:{seconds:02}",
-            minutes / 60,
-            minutes % 60
-        ))
-    }
-}
-
 pub(crate) async fn require_admin(
     State(state): State<AppState>,
     mut request: Request,
@@ -413,7 +388,7 @@ pub(crate) async fn logs(
     let (date, end_date) = match selected {
         Some((start, end)) => (start.to_owned(), end.to_owned()),
         None => {
-            let today: String = sqlx::query_scalar("SELECT date('now', 'localtime')")
+            let today: String = sqlx::query_scalar("SELECT date('now')")
                 .fetch_one(&state.pool)
                 .await?;
             (today.clone(), today)
@@ -429,10 +404,10 @@ pub(crate) async fn logs(
         .as_deref()
         .map(|value| parse_log_cursor(value, &range_scope, query.instance_id))
         .transpose()?;
-    // Convert local midnights separately so DST gives a 23- or 25-hour day.
+    // Calendar dates are UTC; each included day spans exactly 24 hours.
     let (start_utc, end_utc): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT datetime(?1 || ' 00:00:00', 'utc'), \
-                datetime(date(?2, '+1 day') || ' 00:00:00', 'utc')",
+        "SELECT datetime(?1 || ' 00:00:00'), \
+                datetime(date(?2, '+1 day') || ' 00:00:00')",
     )
     .bind(&date)
     .bind(&end_date)
@@ -460,9 +435,7 @@ pub(crate) async fn logs(
                          substr(hex(entity_id), 21, 12))
                  ELSE CAST(entity_id AS TEXT)
                END AS entity_id,
-               strftime('%Y-%m-%d %H:%M:%S', occurred_at, 'localtime') AS occurred_at,
-               CAST(strftime('%s', occurred_at, 'localtime') AS INTEGER) -
-               CAST(strftime('%s', occurred_at) AS INTEGER) AS utc_offset_seconds
+               strftime('%Y-%m-%dT%H:%M:%SZ', occurred_at) AS occurred_at
         FROM audit_events
         WHERE occurred_at >= ?1 AND occurred_at < ?2 AND {LOG_INSTANCE_PREDICATE}
         {sequence_predicate} ORDER BY sequence {order} LIMIT 50
@@ -490,10 +463,7 @@ pub(crate) async fn logs(
                 sequence,
                 action: row.try_get("action")?,
                 entity_id: row.try_get("entity_id")?,
-                occurred_at: server_local_time(
-                    row.try_get("occurred_at")?,
-                    row.try_get("utc_offset_seconds")?,
-                )?,
+                occurred_at: row.try_get("occurred_at")?,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -980,54 +950,53 @@ mod tests {
     }
 
     #[test]
-    fn log_times_include_the_server_offset_for_repeated_clock_hours() {
-        assert_eq!(
-            server_local_time("2026-11-01 01:30:00".into(), -4 * 3600).unwrap(),
-            "2026-11-01 01:30:00 -04:00"
-        );
-        assert_eq!(
-            server_local_time("2026-11-01 01:30:00".into(), -5 * 3600).unwrap(),
-            "2026-11-01 01:30:00 -05:00"
-        );
-        assert_eq!(
-            server_local_time("2026-09-23 14:30:00".into(), 5 * 3600 + 30 * 60).unwrap(),
-            "2026-09-23 14:30:00 +05:30"
-        );
-    }
-
-    #[test]
-    fn local_midnight_bounds_follow_daylight_saving_transitions() {
-        const CHILD: &str = "XSZS_LOG_DST_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .env("TZ", "America/New_York")
-                .env(CHILD, "1")
-                .arg("--exact")
-                .arg("admin::tests::local_midnight_bounds_follow_daylight_saving_transitions")
-                .status()
-                .unwrap();
-            assert!(status.success());
-            return;
-        }
+    fn log_times_normalize_absolute_instants_to_utc() {
         xcss::sqlite::block_on_sqlite_connection(async {
             use sqlx::Connection as _;
             let mut database = sqlx::SqliteConnection::connect("sqlite::memory:")
                 .await
                 .unwrap();
-            for (day, expected_start, expected_end) in [
-                ("2026-03-08", "2026-03-08 05:00:00", "2026-03-09 04:00:00"),
-                ("2026-11-01", "2026-11-01 04:00:00", "2026-11-02 05:00:00"),
+            for value in [
+                "2026-10-12 07:30:00",
+                "2026-10-12T07:30:00Z",
+                "2026-10-12T15:30:00+08:00",
             ] {
-                let actual: (String, String) = sqlx::query_as(
-                    "SELECT datetime(?1 || ' 00:00:00', 'utc'), \
-                            datetime(date(?2, '+1 day') || ' 00:00:00', 'utc')",
-                )
-                .bind(day)
-                .bind(day)
-                .fetch_one(&mut database)
+                let actual: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?)")
+                    .bind(value)
+                    .fetch_one(&mut database)
+                    .await
+                    .unwrap();
+                assert_eq!(actual, "2026-10-12T07:30:00Z");
+            }
+            database.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn utc_midnight_bounds_span_fixed_twenty_four_hours() {
+        xcss::sqlite::block_on_sqlite_connection(async {
+            use sqlx::Connection as _;
+            let mut database = sqlx::SqliteConnection::connect("sqlite::memory:")
                 .await
                 .unwrap();
-                assert_eq!(actual, (expected_start.into(), expected_end.into()));
+            for (day, next) in [
+                ("2024-02-29", "2024-03-01"),
+                ("2026-01-01", "2026-01-02"),
+                ("2026-12-31", "2027-01-01"),
+            ] {
+                let actual: (String, String, i64) = sqlx::query_as(
+                    "SELECT datetime(?1 || ' 00:00:00'), \
+                            datetime(date(?1, '+1 day') || ' 00:00:00'), \
+                            CAST(strftime('%s', date(?1, '+1 day')) AS INTEGER) - CAST(strftime('%s', ?1) AS INTEGER)",
+                ).bind(day).fetch_one(&mut database).await.unwrap();
+                assert_eq!(
+                    actual,
+                    (
+                        format!("{day} 00:00:00"),
+                        format!("{next} 00:00:00"),
+                        86_400
+                    )
+                );
             }
             database.close().await.unwrap();
         });

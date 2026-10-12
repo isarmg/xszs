@@ -6,7 +6,7 @@
 
 ```sh
 sudo systemctl status xszs.service --no-pager --full
-sudo journalctl -u xszs.service --since today --no-pager
+sudo journalctl --utc -u xszs.service --since "$(date -u +%F) 00:00:00 UTC" --no-pager
 curl --fail http://127.0.0.1:8080/healthz
 curl --fail http://127.0.0.1:8080/readyz
 ```
@@ -26,7 +26,7 @@ sudo /opt/isarmg/xszs/releases/1.0.2/scripts/start-server-wsl.sh
 监控数据库和媒体文件系统的空间、inode、I/O 错误，以及就绪状态、重启次数、上传错误和证书到期时间。
 `METRICS_TOKEN` 非空时可用独立 Bearer Token 读取 `/metrics`；它只提供聚合数量和字节统计。令牌留在受保护监控配置中。
 
-日志查询日期与管理页面一致，按服务器本地时区。分享问题时提供时间范围、实例 ID、请求 ID、错误码和版本；媒体、配置和凭据保留在受控主机。
+日志查询日期与管理页面一致，按UTC。分享问题时提供时间范围、实例 ID、请求 ID、错误码和版本；媒体、配置和凭据保留在受控主机。
 
 ## 离线诊断和协调
 

@@ -46,7 +46,7 @@ export function LogsView({ refreshGeneration, instance }: { refreshGeneration: n
     <div className="xcss-content-panel xcss-content-stack">
       <p>{t("实例：{0}", "Instance: {0}", [instance?.name ?? t("全部实例", "All instances")])}</p>
       <div className="xcss-log-date-controls">
-        <label htmlFor="media-log-date-start-year">{t("日志日期范围（服务器时区）", "Log date range (server time zone)")}</label>
+        <label htmlFor="media-log-date-start-year">{t("日志日期范围（UTC）", "Log date range (UTC)")}</label>
         <div className="xcss-actions">{instance && <Button onClick={() => { window.location.hash = "logs"; }}>{t("全部实例", "All instances")}</Button>}<Button onClick={first} disabled={loading || selectedRange === null || !draftValid}>{t("刷新日志", "Refresh logs")}</Button></div>
         <DateRangeField id="media-log-date" value={selectedRange} disabled={selectedRange === null && failure === null} onValidityChange={setDraftValid}
           onApply={range => { setSelectedRange(range); setSelection({range, cursor:null, refreshGeneration}); setGeneration(value => value + 1); setResult(null); setFailure(null); }} />
@@ -55,7 +55,7 @@ export function LogsView({ refreshGeneration, instance }: { refreshGeneration: n
     {emptyMessage !== null ? <EmptyState>{emptyMessage}</EmptyState>
       : failure ? <ErrorState requestId={failure.requestId} onRetry={() => setGeneration(value => value + 1)}>{t("日志暂不可用，请重试。", "Logs are temporarily unavailable. Please retry.")}</ErrorState>
       : logs === null ? <LoadingState>{t("正在加载日志…", "Loading logs…")}</LoadingState>
-      : <Table aria-label={t("备份日志记录", "Backup log records")}><thead><tr><th>{t("服务器时间", "Server time")}</th><th>{t("操作", "Action")}</th><th>{t("对象", "Entity")}</th></tr></thead><tbody>{logs.map(log => <tr key={log.sequence}><td><time>{log.occurred_at}</time></td><td>{actionLabel(log.action)} <code>{log.action}</code></td><td>{log.entity_id}</td></tr>)}</tbody></Table>}
+      : <Table aria-label={t("备份日志记录", "Backup log records")}><thead><tr><th>{t("时间（UTC）", "Time (UTC)")}</th><th>{t("操作", "Action")}</th><th>{t("对象", "Entity")}</th></tr></thead><tbody>{logs.map(log => <tr key={log.sequence}><td><time>{log.occurred_at}</time></td><td>{actionLabel(log.action)} <code>{log.action}</code></td><td>{log.entity_id}</td></tr>)}</tbody></Table>}
     <PageNavigation page={logs === null ? null : result} loading={loading} firstLabel={t("首页", "First page")} canRestart={cursor !== null} first={first} move={move} label={t("日志分页", "Log pages")} />
   </section>;
 }

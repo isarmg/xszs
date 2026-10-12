@@ -123,7 +123,7 @@ curl --fail http://127.0.0.1:8080/readyz
 
 ```sh
 sudo systemctl status xszs.service --no-pager --full
-sudo journalctl -u xszs.service --since today --no-pager
+sudo journalctl --utc -u xszs.service --since "$(date -u +%F) 00:00:00 UTC" --no-pager
 sudo systemctl stop xszs.service
 ```
 
@@ -163,3 +163,7 @@ Doctor 检查当前结构、数据库完整性、对象 Hash、上传恢复及�
 
 归档包含 `bin/xszs`、配置样例、四个安装/运行/验证脚本、systemd unit、`share/web-assets.json`、manifest、LICENSE、本手册和 `docs/feature-inventory-and-tradeoffs.md`。Web 字节嵌入程序。
 完整源码、开发与 API 文档见 [xszs 文档入口](https://github.com/isarmg/xszs/blob/main/docs/README.md)；使用时核对与 `source_revision` 对应的提交。
+
+### 移动上传预算
+
+`max_part_bytes` 仅接受 16–64 MiB（默认 64 MiB），以支持 Android/iOS 固定 16 MiB 分块。低于 16 MiB 或高于 64 MiB 的旧配置会明确拒绝启动，请在配置中修正后运行。上传 manifest 为独立 1 MiB/4096 块预算，metadata 64 KiB 与普通请求 JSON 256 KiB 界限保持。
