@@ -361,8 +361,10 @@ mod precedence_contract_tests {
     #[test]
     fn mobile_part_budget_is_validated_in_each_configuration_layer() {
         for value in [0, 1, 16 * 1024 * 1024 - 1, 64 * 1024 * 1024 + 1] {
-            let mut settings = Settings::default();
-            settings.max_part_bytes = value;
+            let settings = Settings {
+                max_part_bytes: value,
+                ..Settings::default()
+            };
             assert_eq!(
                 validate_intrinsic(&settings, ConfigSource::File)
                     .unwrap_err()
@@ -371,8 +373,10 @@ mod precedence_contract_tests {
             );
         }
         for value in [16 * 1024 * 1024, 64 * 1024 * 1024] {
-            let mut settings = Settings::default();
-            settings.max_part_bytes = value;
+            let settings = Settings {
+                max_part_bytes: value,
+                ..Settings::default()
+            };
             validate_intrinsic(&settings, ConfigSource::File).unwrap();
         }
         let file = serde_json::to_vec(&serde_json::json!({"max_part_bytes": 1})).unwrap();
