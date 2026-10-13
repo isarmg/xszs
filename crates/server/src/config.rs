@@ -5,16 +5,17 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
-use xcss::config::{ConfigSource, EnvMapping, EnvValueKind, Override};
+#[cfg(test)]
+use xcss::config::Override;
+use xcss::config::{ConfigSource, EnvMapping, EnvValueKind};
 
 use anyhow::{Context, Result};
-
-use xcss::client_ip::TrustedProxies;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
 #[derive(Clone)]
 pub struct Config {
+    pub root: PathBuf,
     pub database_url: String,
     pub data_dir: PathBuf,
     pub storage_dir: PathBuf,
@@ -22,56 +23,50 @@ pub struct Config {
     pub bind: SocketAddr,
     pub max_part_bytes: usize,
     pub upload_global_concurrency: usize,
-    pub upload_per_account_concurrency: usize,
+    pub upload_per_instance_concurrency: usize,
     pub metrics_token: Option<String>,
     pub development: bool,
     pub development_web_dir: Option<PathBuf>,
-    pub trusted_proxies: TrustedProxies,
     pub sources: BTreeMap<String, ConfigSource>,
 }
 
 impl Config {
-    pub fn from_sources(
-        config: Option<&Path>,
-        data_dir: Option<&Path>,
-        bind: Option<SocketAddr>,
-        development: Option<bool>,
-    ) -> Result<Self> {
-        let config = selected_config_path(config)?;
-        let file = config
-            .as_deref()
-            .map(xcss::config::read_private_file)
-            .transpose()?;
-        let environment = xcss::config::read_environment(&ENVIRONMENT, |name| env::var(name).ok())?;
-        let mut command_line = Vec::new();
-        if let Some(path) = data_dir {
-            command_line.push(Override::new(
-                "/data_dir",
-                path.to_string_lossy().into_owned(),
-            ));
-        }
-        if let Some(bind) = bind {
-            command_line.push(Override::new("/bind", bind.to_string()));
-        }
-        if let Some(development) = development {
-            command_line.push(Override::new("/development", development));
-        }
+    pub fn from_root_sources(root: &Path, config: &Path) -> Result<Self> {
+        anyhow::ensure!(
+            root.is_absolute()
+                && root != Path::new("/")
+                && root.components().all(|part| matches!(
+                    part,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )),
+            "root must be a normalized absolute directory"
+        );
+        let defaults = Settings {
+            data_dir: Some(root.join("state")),
+            ..Settings::default()
+        };
+
+        let config = normalize_config_path(config)?;
+        let file = xcss::config::read_private_file(&config)?;
+        let environment = xcss::config::read_environment(ENVIRONMENT, |name| env::var(name).ok())?;
         let loaded = xcss::config::resolve_validated(
-            &Settings::default(),
-            file.as_deref(),
+            &defaults,
+            Some(&file),
             &environment,
-            &command_line,
+            &[],
             validate_intrinsic,
         )?;
         let settings = loaded.value;
         let data_dir = settings.data_dir.context("data_dir is required")?;
         anyhow::ensure!(data_dir.is_absolute(), "data_dir must be absolute");
+        validate_state_location(root, &data_dir)?;
         let database_url = format!("sqlite://{}", data_dir.join("xszs.sqlite3").display());
         crate::database::database_path(&database_url)?;
         let storage_dir = settings
             .storage_dir
             .unwrap_or_else(|| data_dir.join("media"));
         anyhow::ensure!(storage_dir.is_absolute(), "storage_dir must be absolute");
+        validate_state_location(root, &storage_dir)?;
         anyhow::ensure!(
             !data_dir.starts_with(&storage_dir),
             "storage_dir cannot contain the internal data_dir"
@@ -89,12 +84,12 @@ impl Config {
             "max_part_bytes must be between 16 MiB and 64 MiB to support mobile uploads"
         );
         anyhow::ensure!(
-            settings.upload_global_concurrency > 0 && settings.upload_per_account_concurrency > 0,
+            settings.upload_global_concurrency > 0 && settings.upload_per_instance_concurrency > 0,
             "upload concurrency must be positive"
         );
         anyhow::ensure!(
-            settings.upload_per_account_concurrency <= settings.upload_global_concurrency,
-            "upload_per_account_concurrency cannot exceed upload_global_concurrency"
+            settings.upload_per_instance_concurrency <= settings.upload_global_concurrency,
+            "upload_per_instance_concurrency cannot exceed upload_global_concurrency"
         );
         validate_security_mode(bind, settings.development)?;
         if let Some(path) = &settings.development_web_dir {
@@ -105,8 +100,8 @@ impl Config {
             anyhow::ensure!(path.is_absolute(), "development_web_dir must be absolute");
             xcss::web_assets::DirectoryAssets::new(path)?;
         }
-        let trusted_proxies = TrustedProxies::parse(&settings.trusted_proxies)?;
         Ok(Self {
+            root: root.to_path_buf(),
             database_url,
             data_dir,
             storage_dir,
@@ -114,11 +109,10 @@ impl Config {
             bind,
             max_part_bytes: settings.max_part_bytes,
             upload_global_concurrency: settings.upload_global_concurrency,
-            upload_per_account_concurrency: settings.upload_per_account_concurrency,
+            upload_per_instance_concurrency: settings.upload_per_instance_concurrency,
             metrics_token: settings.metrics_token,
             development: settings.development,
             development_web_dir: settings.development_web_dir,
-            trusted_proxies,
             sources: loaded.sources,
         })
     }
@@ -133,32 +127,30 @@ struct Settings {
     bind: SocketAddr,
     max_part_bytes: usize,
     upload_global_concurrency: usize,
-    upload_per_account_concurrency: usize,
+    upload_per_instance_concurrency: usize,
     metrics_token: Option<String>,
     development: bool,
     development_web_dir: Option<PathBuf>,
-    trusted_proxies: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            data_dir: Some(PathBuf::from("/var/lib/isarmg/xszs")),
+            data_dir: Some(PathBuf::from("/opt/isarmg/xszs/state")),
             storage_dir: None,
             log_level: "info".into(),
             bind: DEFAULT_BIND.parse().expect("valid default bind"),
             max_part_bytes: 64 * 1024 * 1024,
             upload_global_concurrency: 16,
-            upload_per_account_concurrency: 4,
+            upload_per_instance_concurrency: 4,
             metrics_token: None,
             development: false,
             development_web_dir: None,
-            trusted_proxies: Vec::new(),
         }
     }
 }
 
-const ENVIRONMENT: [EnvMapping<'static>; 11] = [
+const ENVIRONMENT: &[EnvMapping<'static>] = &[
     EnvMapping {
         variable: "XSZS_STORAGE_DIR",
         path: "/storage_dir",
@@ -195,8 +187,8 @@ const ENVIRONMENT: [EnvMapping<'static>; 11] = [
         kind: EnvValueKind::UnsignedInteger,
     },
     EnvMapping {
-        variable: "XSZS_UPLOAD_PER_ACCOUNT_CONCURRENCY",
-        path: "/upload_per_account_concurrency",
+        variable: "XSZS_UPLOAD_PER_INSTANCE_CONCURRENCY",
+        path: "/upload_per_instance_concurrency",
         kind: EnvValueKind::UnsignedInteger,
     },
     EnvMapping {
@@ -208,11 +200,6 @@ const ENVIRONMENT: [EnvMapping<'static>; 11] = [
         variable: "XSZS_DEVELOPMENT",
         path: "/development",
         kind: EnvValueKind::Boolean,
-    },
-    EnvMapping {
-        variable: "XSZS_TRUSTED_PROXIES",
-        path: "/trusted_proxies",
-        kind: EnvValueKind::Json,
     },
 ];
 
@@ -310,15 +297,14 @@ fn validate_intrinsic(
             settings.upload_global_concurrency,
         ),
         (
-            "/upload_per_account_concurrency",
-            settings.upload_per_account_concurrency,
+            "/upload_per_instance_concurrency",
+            settings.upload_per_instance_concurrency,
         ),
     ] {
         if value == 0 || value > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(invalid(path));
         }
     }
-    TrustedProxies::parse(&settings.trusted_proxies).map_err(|_| invalid("/trusted_proxies"))?;
     Ok(())
 }
 
@@ -350,11 +336,11 @@ mod precedence_contract_tests {
         let error = xcss::config::resolve_validated(
             &Settings::default(),
             Some(&file),
-            &[],
             &[Override::new(
                 "/max_part_bytes",
                 serde_json::json!(64 * 1024 * 1024),
             )],
+            &[],
             validate_intrinsic,
         )
         .err()
@@ -369,11 +355,11 @@ mod precedence_contract_tests {
         let error = xcss::config::resolve_validated(
             &Settings::default(),
             Some(&file),
-            &[],
             &[Override::new(
                 "/upload_global_concurrency",
                 serde_json::json!(16),
             )],
+            &[],
             validate_intrinsic,
         )
         .err()
@@ -388,7 +374,7 @@ mod precedence_contract_tests {
     }
 }
 
-/// Normalize the CLI file authority before private reads and resource reporting.
+/// Normalize the required configuration path before private reads and reporting.
 pub fn normalize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(
         !path
@@ -406,7 +392,7 @@ mod unified_configuration_tests {
     fn explicit_missing_config_is_an_error() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing.json");
-        assert!(Config::from_sources(Some(&missing), None, None, None).is_err());
+        assert!(Config::from_root_sources(directory.path(), &missing).is_err());
     }
     #[test]
     fn defaults_and_environment_belong_to_this_server() {
@@ -414,7 +400,7 @@ mod unified_configuration_tests {
         assert!(!settings.development);
         assert_eq!(
             settings.data_dir.unwrap(),
-            PathBuf::from("/var/lib/isarmg/xszs")
+            PathBuf::from("/opt/isarmg/xszs/state")
         );
         assert!(
             ENVIRONMENT
@@ -442,24 +428,12 @@ mod unified_configuration_tests {
         );
     }
     #[test]
-    fn bind_precedence_is_cli_then_prefixed_environment_then_file() {
+    fn prefixed_environment_overrides_the_required_file() {
         let file = br#"{"bind":"127.0.0.1:19001"}"#;
-        let environment = xcss::config::read_environment(&ENVIRONMENT, |name| {
+        let environment = xcss::config::read_environment(ENVIRONMENT, |name| {
             (name == "XSZS_BIND").then(|| "127.0.0.1:19002".into())
         })
         .unwrap();
-        let loaded = xcss::config::resolve_validated(
-            &Settings::default(),
-            Some(file),
-            &environment,
-            &[Override::new("/bind", "127.0.0.1:19003")],
-            validate_intrinsic,
-        )
-        .unwrap();
-        assert_eq!(
-            loaded.value.bind,
-            "127.0.0.1:19003".parse::<SocketAddr>().unwrap()
-        );
         let loaded = xcss::config::resolve_validated(
             &Settings::default(),
             Some(file),
@@ -475,36 +449,15 @@ mod unified_configuration_tests {
     }
 }
 
-/// An omitted default file is optional; explicit files and unreadable defaults fail closed.
-pub fn selected_config_path(config: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
-    match config {
-        Some(path) => Ok(Some(normalize_config_path(path)?)),
-        None => {
-            let path = PathBuf::from("/etc/isarmg/xszs/config.json");
-            existing_default_config(path)
-        }
-    }
-}
-
-fn existing_default_config(path: PathBuf) -> anyhow::Result<Option<PathBuf>> {
-    match std::fs::symlink_metadata(&path) {
-        Ok(_) => Ok(Some(path)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[cfg(all(test, unix))]
-mod default_configuration_tests {
+mod required_configuration_tests {
     use super::*;
     #[test]
-    fn dangling_default_symlink_is_not_treated_as_an_absent_file() {
+    fn a_linked_required_configuration_never_falls_back_to_defaults() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
-        assert!(existing_default_config(path.clone()).unwrap().is_none());
         std::os::unix::fs::symlink(directory.path().join("missing.json"), &path).unwrap();
-        let selected = existing_default_config(path).unwrap().unwrap();
-        assert!(xcss::config::read_private_file(&selected).is_err());
+        assert!(Config::from_root_sources(directory.path(), &path).is_err());
     }
 }
 
@@ -544,4 +497,36 @@ mod state_configuration_tests {
             .is_err()
         );
     }
+}
+
+fn validate_state_location(root: &Path, state: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        state.is_absolute()
+            && state != Path::new("/")
+            && state.components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "state paths must be normalized absolute directories"
+    );
+    anyhow::ensure!(
+        !root.starts_with(state),
+        "state directory cannot contain the installation root"
+    );
+    for name in [
+        "config",
+        "logs",
+        "run",
+        "bin",
+        "libexec",
+        "share",
+        "maintenance",
+    ] {
+        let protected = root.join(name);
+        anyhow::ensure!(
+            !state.starts_with(&protected) && !protected.starts_with(state),
+            "state directory overlaps a protected installation path"
+        );
+    }
+    Ok(())
 }

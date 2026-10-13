@@ -420,20 +420,18 @@ impl LocalStorage {
         Ok(self.files.remove_file(staged.as_path())?)
     }
 
-    pub(crate) fn upload_directories(&self) -> Result<Vec<Uuid>, AppError> {
-        Ok(self
-            .files
-            .list_entries_bounded(Path::new("uploads"), usize::MAX)?
-            .into_iter()
-            .filter_map(|(name, kind)| {
-                if kind != crate::rooted_fs::RootEntryKind::Directory {
-                    return None;
-                }
+    pub(crate) fn upload_directories(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<Uuid, AppError>> + Send>, AppError> {
+        let entries = self.files.directory_names(Path::new("uploads"))?;
+        Ok(Box::new(entries.filter_map(|entry| match entry {
+            Err(error) => Some(Err(error.into())),
+            Ok(name) => {
                 let name = name.to_str()?;
                 let id = Uuid::parse_str(name).ok()?;
-                (id.to_string() == name).then_some(id)
-            })
-            .collect())
+                (id.to_string() == name).then_some(Ok(id))
+            }
+        })))
     }
 
     // Only call after the upload's metadata has been removed. Keep commit.lock:

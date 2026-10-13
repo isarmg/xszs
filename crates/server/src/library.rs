@@ -327,12 +327,22 @@ pub async fn delete_asset_permanently(
     ContractJson(_request): ContractJson<EmptyRequest>,
 ) -> Result<StatusCode, AppError> {
     let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let upload_ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM uploads WHERE asset_id = ? AND account_id = ?")
-            .bind(asset_id)
-            .bind(auth.account_id)
-            .fetch_all(&mut *transaction)
-            .await?;
+    // The receipt is the only recovery authority for a published object whose
+    // metadata transaction has not completed. Preserve it until reconciliation
+    // establishes a terminal state; receiving uploads own only disposable parts.
+    let unresolved_commit: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM uploads WHERE asset_id = ? AND account_id = ? \
+         AND commit_state IN ('commit_started','finalizing','unknown'))",
+    )
+    .bind(asset_id)
+    .bind(auth.account_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if unresolved_commit {
+        return Err(AppError::conflict(
+            "asset contains an unresolved upload commit; review or reconcile it before deletion",
+        ));
+    }
     let deleted = sqlx::query(
         "DELETE FROM assets WHERE id = ? AND account_id = ? AND deleted_at IS NOT NULL",
     )
@@ -364,13 +374,13 @@ pub async fn delete_asset_permanently(
     // The asset deletion is already durable. Physical reclamation is a
     // separate, retryable close-out step; never return 500 after committing
     // the user-visible delete because that would invite an unsafe replay.
-    let mut parts_pending = false;
-    for upload_id in upload_ids {
-        if let Err(error) = state.storage.remove_orphan_upload_parts(upload_id) {
-            parts_pending = true;
-            tracing::warn!(%upload_id, ?error, "deleted upload parts await reconciliation");
+    let parts_pending = match crate::upload_commit::reconcile_orphan_upload_parts(&state).await {
+        Ok((_, errors)) => errors != 0,
+        Err(error) => {
+            tracing::warn!(?error, "deleted upload parts await reconciliation");
+            true
         }
-    }
+    };
     match reconcile_orphan_blobs(&state, Some(auth.account_id)).await {
         Ok(report) if report.errors == 0 && !parts_pending => Ok(StatusCode::NO_CONTENT),
         Ok(report) => {
@@ -396,7 +406,7 @@ pub async fn delete_asset_permanently(
 /// row first. `DELETE ... RETURNING` obtains SQLite's write lock and makes the
 /// row unavailable to concurrent deduplication while the rooted unlink runs.
 /// On unlink failure the transaction rolls back, leaving both row and file for
-/// the next startup/periodic/manual reconciliation pass. If commit fails after
+/// the next startup/periodic reconciliation pass. If commit fails after
 /// unlink, the restored row points to a missing unreferenced file and the next
 /// pass safely finishes the metadata deletion.
 pub(crate) async fn reconcile_orphan_blobs(

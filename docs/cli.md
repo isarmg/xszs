@@ -1,12 +1,11 @@
-# 命令
+# Installation and operation
 
-- `xszs init --username admin`：密码从 stdin 读取，创建空实例、管理员和持久业务密钥；已有状态拒绝覆盖
-- `xszs run`：只启动已初始化实例，不创建管理员、密钥或数据库
-- `xszs config validate --json`：纯配置验证，初始化前可执行
-- `xszs check --json`：离线检查数据库、密钥和目录；不是迁移或修复
-- `xszs status --json`：查询在线服务，离线不能报告 ready
-- `xszs admin reset-password --username admin`：服务停止后执行，密码从 stdin 读取，使用 data_dir 中固定数据库
+Use the signed release package with the shared [XSSI](https://github.com/isarmg/xssi) installer. Verify the package against an independently supplied release public key and fingerprint before executing its scripts or helper. The installer prepares the service account, directories, configuration, initial administrator and systemd unit. Host operations belong to the scripts.
 
-全局参数：`--config /absolute/config.json`、`--data-dir /absolute/state`、`--bind IP:PORT`、`--development true|false`。JSON > 默认值之前依次由产品前缀环境变量、CLI 覆盖；配置错误不会被覆盖隐藏。
+The default installation root is `/opt/isarmg/xszs`. Runtime invocation is `xszs --root ROOT`. The server reads `ROOT/config/config.json`, opens existing initialized state and starts HTTP. Startup never creates administrator accounts or installation secrets.
 
-领域检查保留 `doctor`（媒体内容完整性）和 `reconcile scan`（上传恢复）。`release-verify PATH` 是显式离线发行包检查，与 run 无关。
+An upgrade first downloads and verifies the complete package while the existing service is running. Its script then stops all writers and delegates the locked backup, explicit source/target schema migration and atomic package switch to XSSC. The script starts the resulting service and checks readiness; failure restores the backed-up generation before returning to the previous service. Media/file paths are preserved instead of silently moved.
+
+Offline configuration checks and administrator password resets use the signed `libexec/setup` helper through XSSI maintenance scripts. Runtime HTTP administrator and health endpoints remain available. Passwords use the existing administrator hash policy; resetting an administrator password preserves instance authorization keys.
+
+Uninstallation and removal of data are performed by the operator.

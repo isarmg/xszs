@@ -1,108 +1,51 @@
+use crate::error::AppError;
 use std::{
     collections::HashMap,
     hash::Hash,
-    net::IpAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-
-use crate::error::AppError;
-use sha2::{Digest, Sha256};
-
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use uuid::Uuid;
 pub(crate) const LOGIN_BODY_LIMIT_BYTES: usize = 4 * 1024;
-
-const SOURCE_BURST: u32 = 16;
-const SOURCE_REFILL_INTERVAL: Duration = Duration::from_secs(1);
-const SOURCE_ENTRY_CAPACITY: usize = 2_048;
-const ACCOUNT_BURST: u32 = 8;
-const ACCOUNT_REFILL_INTERVAL: Duration = Duration::from_secs(15);
-const ACCOUNT_ENTRY_CAPACITY: usize = 4_096;
+const INSTANCE_BURST: u32 = 8;
+const INSTANCE_REFILL_INTERVAL: Duration = Duration::from_secs(15);
+const INSTANCE_ENTRY_CAPACITY: usize = 4096;
 const RATE_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 #[derive(Clone)]
 pub(crate) struct LoginAdmission {
-    rates: Arc<Mutex<LoginRateState>>,
+    rates: Arc<Mutex<BoundedBuckets<Uuid>>>,
+    work: Arc<Semaphore>,
 }
-
 impl Default for LoginAdmission {
     fn default() -> Self {
         Self::new(
-            BucketPolicy::new(SOURCE_BURST, SOURCE_REFILL_INTERVAL),
-            SOURCE_ENTRY_CAPACITY,
-            BucketPolicy::new(ACCOUNT_BURST, ACCOUNT_REFILL_INTERVAL),
-            ACCOUNT_ENTRY_CAPACITY,
+            BucketPolicy::new(INSTANCE_BURST, INSTANCE_REFILL_INTERVAL),
+            INSTANCE_ENTRY_CAPACITY,
             RATE_ENTRY_TTL,
         )
     }
 }
-
 impl LoginAdmission {
-    fn new(
-        source_policy: BucketPolicy,
-        source_capacity: usize,
-        account_policy: BucketPolicy,
-        account_capacity: usize,
-        entry_ttl: Duration,
-    ) -> Self {
+    fn new(policy: BucketPolicy, capacity: usize, ttl: Duration) -> Self {
         Self {
-            rates: Arc::new(Mutex::new(LoginRateState {
-                sources: BoundedBuckets::new(source_policy, source_capacity, entry_ttl),
-                accounts: BoundedBuckets::new(account_policy, account_capacity, entry_ttl),
-            })),
+            rates: Arc::new(Mutex::new(BoundedBuckets::new(policy, capacity, ttl))),
+            work: Arc::new(Semaphore::new(16)),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(source_burst: u32, account_burst: u32) -> Self {
-        Self::new(
-            BucketPolicy::new(source_burst, Duration::from_secs(60)),
-            8,
-            BucketPolicy::new(account_burst, Duration::from_secs(60)),
-            8,
-            Duration::from_secs(300),
-        )
+    pub(crate) fn acquire_work(&self) -> Result<OwnedSemaphorePermit, AppError> {
+        self.work.clone().try_acquire_owned().map_err(|_| {
+            AppError::too_many_requests_with_message(1, "pairing work capacity is busy")
+        })
     }
-
-    pub(crate) fn check_source(&self, source: IpAddr) -> Result<(), AppError> {
-        self.check_source_at(canonical_ip(source), Instant::now())
-    }
-
-    fn check_source_at(&self, source: IpAddr, now: Instant) -> Result<(), AppError> {
+    pub(crate) fn check_instance(&self, verified_instance: Uuid) -> Result<(), AppError> {
         self.rates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .sources
-            .check_at(source, now)
-            .map_err(rate_limited)
-    }
-
-    pub(crate) fn check_account(&self, normalized_account: &str) -> Result<(), AppError> {
-        self.check_account_at(normalized_account, Instant::now())
-    }
-
-    fn check_account_at(&self, normalized_account: &str, now: Instant) -> Result<(), AppError> {
-        self.rates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .accounts
-            .check_at(account_key(normalized_account), now)
+            .check_at(verified_instance, Instant::now())
             .map_err(rate_limited)
     }
 }
-
-fn canonical_ip(address: IpAddr) -> IpAddr {
-    match address {
-        IpAddr::V6(address) => address
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(address)),
-        IpAddr::V4(_) => address,
-    }
-}
-
-fn account_key(normalized_account: &str) -> [u8; 32] {
-    Sha256::digest(normalized_account.as_bytes()).into()
-}
-
 fn rate_limited(delay: Duration) -> AppError {
     AppError::too_many_requests(retry_after_seconds(delay))
 }
@@ -112,11 +55,6 @@ fn retry_after_seconds(delay: Duration) -> u64 {
         .as_secs()
         .saturating_add(u64::from(delay.subsec_nanos() != 0))
         .max(1)
-}
-
-struct LoginRateState {
-    sources: BoundedBuckets<IpAddr>,
-    accounts: BoundedBuckets<[u8; 32]>,
 }
 
 #[derive(Clone, Copy)]
@@ -247,35 +185,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn source_and_normalized_account_budgets_are_independent() {
-        let admission = LoginAdmission::for_test(2, 2);
-        let now = Instant::now();
-        let source: IpAddr = "192.0.2.10".parse().unwrap();
-        admission.check_source_at(source, now).unwrap();
-        admission.check_source_at(source, now).unwrap();
-        assert!(admission.check_source_at(source, now).is_err());
-        admission
-            .check_source_at("192.0.2.11".parse().unwrap(), now)
-            .unwrap();
-
-        admission
-            .check_account_at("admin@example.com", now)
-            .unwrap();
-        admission
-            .check_account_at("admin@example.com", now)
-            .unwrap();
-        assert!(
-            admission
-                .check_account_at("admin@example.com", now)
-                .is_err()
+    fn verified_instance_limits_do_not_share_an_address_or_credential_bucket() {
+        let admission = LoginAdmission::new(
+            BucketPolicy::new(1, Duration::from_secs(60)),
+            2,
+            Duration::from_secs(300),
         );
-        admission
-            .check_account_at("other@example.com", now)
-            .unwrap();
+        let first = Uuid::new_v4();
+        admission.check_instance(first).unwrap();
+        assert!(admission.check_instance(first).is_err());
+        admission.check_instance(Uuid::new_v4()).unwrap();
+        assert!(admission.check_instance(Uuid::new_v4()).is_err());
     }
-
     #[test]
     fn bounded_buckets_expire_and_only_evict_replenished_entries() {
         let policy = BucketPolicy::new(1, Duration::from_secs(1));

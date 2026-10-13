@@ -52,6 +52,7 @@ pub(crate) enum CommitFailpoint {
 struct CommitRecord {
     upload_id: Uuid,
     account_id: Uuid,
+    device_id: Uuid,
     asset_id: Uuid,
     request: CreateUploadRequest,
     commit_state: String,
@@ -115,6 +116,23 @@ pub(crate) async fn complete_with_failpoint(
 }
 
 async fn complete_inner(
+    state: &AppState,
+    upload_id: Uuid,
+    required_account_id: Option<Uuid>,
+    #[cfg_attr(not(test), allow(unused_variables))] failpoint: Option<CommitFailpoint>,
+) -> Result<CommitOutcome, AppError> {
+    // Authorize a real upload before any filesystem lock directory or keyed limit.
+    let record = load_commit(&state.pool, upload_id, required_account_id).await?;
+    let permit = state.completion_admission.try_acquire(record.device_id)?;
+    let state = state.clone();
+    // The owned task retains the work permit after an HTTP request is cancelled.
+    crate::routes::run_completion(permit, async move {
+        complete_work(&state, upload_id, required_account_id, failpoint).await
+    })
+    .await
+}
+
+async fn complete_work(
     state: &AppState,
     upload_id: Uuid,
     required_account_id: Option<Uuid>,
@@ -784,7 +802,7 @@ async fn load_commit(
 ) -> Result<CommitRecord, AppError> {
     let row = sqlx::query(
         r#"
-        SELECT u.id, u.account_id, u.asset_id, u.request, u.commit_state, u.commit_error,
+        SELECT u.id, u.account_id, u.device_id, u.asset_id, u.request, u.commit_state, u.commit_error,
                u.commit_staged_key, u.commit_final_key, u.commit_account_path,
                u.commit_expected_size, u.commit_expected_blake3, u.commit_blob_id,
                u.commit_resource_id, u.commit_deduplicated,
@@ -802,6 +820,7 @@ async fn load_commit(
     Ok(CommitRecord {
         upload_id: row.get("id"),
         account_id: row.get("account_id"),
+        device_id: row.get("device_id"),
         asset_id: row.get("asset_id"),
         request: serde_json::from_value(row.get::<Value, _>("request"))?,
         commit_state: row.get("commit_state"),
@@ -989,7 +1008,7 @@ async fn mark_unknown_message<T>(
     .execute(pool)
     .await?;
     Err(AppError::conflict(format!(
-        "upload commit requires manual reconciliation: {reason}"
+        "upload commit state requires review: {reason}"
     )))
 }
 
@@ -1007,6 +1026,54 @@ fn stop_at(current: Option<CommitFailpoint>, expected: CommitFailpoint) -> Resul
 #[cfg(not(test))]
 fn stop_at<T>(_current: Option<T>, _expected: T) -> Result<(), AppError> {
     Ok(())
+}
+
+/// Scan descriptor-owned directories and compare a bounded batch with SQLite.
+/// Retain every upload lock inode; late part writers are cleaned on a later pass.
+pub(crate) async fn reconcile_orphan_upload_parts(
+    state: &AppState,
+) -> Result<(u64, u64), AppError> {
+    let mut directories = state.storage.upload_directories()?;
+    let mut removed = 0_u64;
+    let mut errors = 0_u64;
+    loop {
+        let batch = directories
+            .by_ref()
+            .take(256)
+            .collect::<Result<Vec<_>, _>>()?;
+        if batch.is_empty() {
+            break;
+        }
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM uploads WHERE id IN (");
+        {
+            let mut separated = query.separated(",");
+            for id in &batch {
+                separated.push_bind(*id);
+            }
+        }
+        query.push(")");
+        let retained: HashSet<Uuid> = query
+            .build_query_scalar()
+            .fetch_all(&state.pool)
+            .await?
+            .into_iter()
+            .collect();
+        for id in batch {
+            if retained.contains(&id) {
+                continue;
+            }
+            match state.storage.remove_orphan_upload_parts(id) {
+                Ok(count) => removed = removed.saturating_add(count),
+                Err(error) => {
+                    errors = errors.saturating_add(1);
+                    tracing::warn!(upload_id = %id, ?error, "orphan upload parts will be retried");
+                }
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok((removed, errors))
 }
 
 pub(crate) async fn reconcile_all(state: &AppState) -> Result<ReconcileReport, AppError> {
@@ -1069,26 +1136,9 @@ pub(crate) async fn reconcile_all(state: &AppState) -> Result<ReconcileReport, A
         .saturating_add(blob_report.removed);
     report.errors = report.errors.saturating_add(blob_report.errors);
 
-    // Covers crashes after deleting asset metadata and writes that were already
-    // in flight when deletion reclaimed the upload's original parts.
-    let directories = state.storage.upload_directories()?;
-    let retained_uploads: HashSet<Uuid> = sqlx::query_scalar("SELECT id FROM uploads")
-        .fetch_all(&state.pool)
-        .await?
-        .into_iter()
-        .collect();
-    for upload_id in directories {
-        if retained_uploads.contains(&upload_id) {
-            continue;
-        }
-        match state.storage.remove_orphan_upload_parts(upload_id) {
-            Ok(removed) => report.orphan_upload_parts_removed += removed,
-            Err(error) => {
-                report.errors += 1;
-                tracing::warn!(%upload_id, ?error, "orphan upload parts will be retried");
-            }
-        }
-    }
+    let (removed, errors) = reconcile_orphan_upload_parts(state).await?;
+    report.orphan_upload_parts_removed = report.orphan_upload_parts_removed.saturating_add(removed);
+    report.errors = report.errors.saturating_add(errors);
 
     let accounts: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT id, storage_path FROM accounts ORDER BY id")

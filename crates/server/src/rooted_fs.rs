@@ -1,12 +1,7 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RootEntryKind {
-    Directory,
-    RegularFile,
-}
+type DirectoryNames = Box<dyn Iterator<Item = std::io::Result<std::ffi::OsString>> + Send>;
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::RootEntryKind;
     use rustix::{
         fd::OwnedFd,
         fs::{
@@ -173,6 +168,41 @@ mod platform {
             fsync(&parent.fd).map_err(std::io::Error::from)
         }
 
+        pub(crate) fn directory_names(
+            &self,
+            directory: &Path,
+        ) -> std::io::Result<super::DirectoryNames> {
+            validate_relative(directory)?;
+            self.run_before_operation_hook();
+            let fd = self.open_directory(directory, false)?;
+            let mut entries = Dir::new(fd).map_err(std::io::Error::from)?;
+            Ok(Box::new(std::iter::from_fn(move || {
+                loop {
+                    let entry = match entries.next()? {
+                        Ok(entry) => entry,
+                        Err(error) => return Some(Err(error.into())),
+                    };
+                    let name = entry.file_name();
+                    if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                        continue;
+                    }
+                    let name =
+                        std::ffi::OsString::from(std::ffi::OsStr::from_bytes(name.to_bytes()));
+                    let metadata = match entries
+                        .fd()
+                        .and_then(|fd| statat(fd, &name, AtFlags::SYMLINK_NOFOLLOW))
+                    {
+                        Ok(metadata) => metadata,
+                        Err(Errno::NOENT) => continue,
+                        Err(error) => return Some(Err(error.into())),
+                    };
+                    if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+                        return Some(Ok(name));
+                    }
+                }
+            })))
+        }
+
         pub(crate) fn list_regular_files(
             &self,
             directory: &Path,
@@ -202,50 +232,6 @@ mod platform {
                         name.to_bytes(),
                     )));
                 }
-            }
-            Ok(entries)
-        }
-
-        #[cfg(test)]
-        pub(crate) fn list_entries(
-            &self,
-            directory: &Path,
-        ) -> std::io::Result<Vec<(std::ffi::OsString, RootEntryKind)>> {
-            self.list_entries_bounded(directory, usize::MAX)
-        }
-
-        pub(crate) fn list_entries_bounded(
-            &self,
-            directory: &Path,
-            max_entries: usize,
-        ) -> std::io::Result<Vec<(std::ffi::OsString, RootEntryKind)>> {
-            if !directory.as_os_str().is_empty() {
-                validate_relative(directory)?;
-            }
-            self.run_before_operation_hook();
-            let fd = self.open_directory(directory, false)?;
-            let metadata_fd = dup(&fd).map_err(std::io::Error::from)?;
-            let mut entries = Vec::new();
-            for entry in Dir::new(fd).map_err(std::io::Error::from)? {
-                let entry = entry.map_err(std::io::Error::from)?;
-                let name = entry.file_name();
-                if name.to_bytes() == b"." || name.to_bytes() == b".." {
-                    continue;
-                }
-                if entries.len() == max_entries {
-                    return Err(std::io::Error::other(
-                        "media directory entry budget exceeded",
-                    ));
-                }
-                let name = std::ffi::OsString::from(std::ffi::OsStr::from_bytes(name.to_bytes()));
-                let metadata = statat(&metadata_fd, &name, AtFlags::SYMLINK_NOFOLLOW)
-                    .map_err(std::io::Error::from)?;
-                let kind = match FileType::from_raw_mode(metadata.st_mode) {
-                    FileType::RegularFile => RootEntryKind::RegularFile,
-                    FileType::Directory => RootEntryKind::Directory,
-                    _ => return Err(unsafe_entry("refusing a symbolic link or special entry")),
-                };
-                entries.push((name, kind));
             }
             Ok(entries)
         }
@@ -464,8 +450,6 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    use super::RootEntryKind;
-
     #[derive(Clone, Debug)]
     pub(crate) struct RootedFs;
 
@@ -510,26 +494,17 @@ mod platform {
             Err(unsupported())
         }
 
+        pub(crate) fn directory_names(
+            &self,
+            _directory: &Path,
+        ) -> std::io::Result<super::DirectoryNames> {
+            Err(unsupported())
+        }
+
         pub(crate) fn list_regular_files(
             &self,
             _directory: &Path,
         ) -> std::io::Result<Vec<std::ffi::OsString>> {
-            Err(unsupported())
-        }
-
-        #[cfg(test)]
-        pub(crate) fn list_entries(
-            &self,
-            directory: &Path,
-        ) -> std::io::Result<Vec<(std::ffi::OsString, RootEntryKind)>> {
-            self.list_entries_bounded(directory, usize::MAX)
-        }
-
-        pub(crate) fn list_entries_bounded(
-            &self,
-            _directory: &Path,
-            _max_entries: usize,
-        ) -> std::io::Result<Vec<(std::ffi::OsString, RootEntryKind)>> {
             Err(unsupported())
         }
 
@@ -555,33 +530,3 @@ mod platform {
 }
 
 pub(crate) use platform::RootedFs;
-
-#[cfg(all(test, target_os = "linux"))]
-mod bounded_tests {
-    use super::*;
-
-    #[test]
-    fn directory_budget_rejects_excess_without_removing_entries() {
-        let root = tempfile::tempdir().unwrap();
-        for name in ["a", "b", "c"] {
-            std::fs::write(root.path().join(name), name).unwrap();
-        }
-        let fs = RootedFs::new(root.path()).unwrap();
-        assert!(
-            fs.list_entries_bounded(std::path::Path::new(""), 2)
-                .is_err()
-        );
-        assert_eq!(
-            fs.list_entries_bounded(std::path::Path::new(""), 3)
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(fs.list_entries(std::path::Path::new("")).unwrap().len(), 3);
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
-        assert!(
-            fs.list_entries_bounded(std::path::Path::new(""), 0)
-                .is_err()
-        );
-    }
-}

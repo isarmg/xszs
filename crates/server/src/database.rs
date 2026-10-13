@@ -58,6 +58,12 @@ pub(crate) async fn connect_validated_location(database_url: &str) -> anyhow::Re
         pool.close().await;
         return Err(error.into());
     }
+    if let Err(error) =
+        xcss::platform_db::require_current_platform_metadata(&pool, "server-control-plane").await
+    {
+        pool.close().await;
+        return Err(error.into());
+    }
     Ok(pool)
 }
 
@@ -80,6 +86,18 @@ pub(crate) fn connection_limits() -> xcss::sqlite::ConnectionLimits {
     xcss::sqlite::ConnectionLimits::new(2 * 1024 * 1024)
 }
 
+pub(crate) async fn ready(pool: &SqlitePool) -> bool {
+    let Ok(expected) = current_schema_identity() else {
+        return false;
+    };
+    xcss::sqlite::require_pool_current_schema(pool, &expected)
+        .await
+        .is_ok()
+        && xcss::platform_db::require_current_platform_metadata(pool, "server-control-plane")
+            .await
+            .is_ok()
+}
+
 pub(crate) async fn harden_connection(connection: &mut SqliteConnection) -> anyhow::Result<()> {
     xcss::sqlite::apply_connection_limits(connection, connection_limits()).await?;
     xcss::sqlite::enable_defensive(connection).await?;
@@ -89,9 +107,14 @@ pub(crate) async fn harden_connection(connection: &mut SqliteConnection) -> anyh
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn validate_current_database(path: &Path) -> anyhow::Result<()> {
     require_secure_database_file(path)?;
-    let snapshot = xcss::sqlite::ValidationSnapshot::capture(path)?;
+    validate_current_snapshot(xcss::sqlite::ValidationSnapshot::capture(path)?)
+}
+
+#[cfg(test)]
+fn validate_current_snapshot(snapshot: xcss::sqlite::ValidationSnapshot) -> anyhow::Result<()> {
     xcss::sqlite::block_on_sqlite_connection(async {
         let mut connection = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
@@ -112,49 +135,6 @@ pub(crate) fn validate_current_database(path: &Path) -> anyhow::Result<()> {
                 .execute(&mut connection)
                 .await?;
             validate_current_connection(&mut connection).await
-        }
-        .await;
-        let closed = connection.close().await;
-        result?;
-        closed?;
-        Ok(())
-    })
-}
-
-pub(crate) fn integrity_and_foreign_key_check(path: &Path) -> anyhow::Result<()> {
-    require_secure_database_file(path)?;
-    let snapshot = xcss::sqlite::ValidationSnapshot::capture(path)?;
-    xcss::sqlite::block_on_sqlite_connection(async {
-        let mut connection = SqliteConnection::connect_with(
-            &SqliteConnectOptions::new()
-                .filename(snapshot.database_path())
-                .create_if_missing(false)
-                .busy_timeout(Duration::from_secs(2)),
-        )
-        .await?;
-        let result = async {
-            harden_connection(&mut connection).await?;
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            connection
-                .lock_handle()
-                .await?
-                .set_progress_handler(1000, move || std::time::Instant::now() < deadline);
-            sqlx::query("PRAGMA query_only=ON")
-                .execute(&mut connection)
-                .await?;
-            let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check(32)")
-                .fetch_all(&mut connection)
-                .await?;
-            ensure!(
-                integrity.len() == 1 && integrity[0].eq_ignore_ascii_case("ok"),
-                "SQLite integrity check failed"
-            );
-            let foreign_keys: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
-                    .fetch_one(&mut connection)
-                    .await?;
-            ensure!(foreign_keys == 0, "SQLite foreign-key check failed");
-            Ok::<_, anyhow::Error>(())
         }
         .await;
         let closed = connection.close().await;
@@ -264,7 +244,7 @@ pub(crate) fn current_schema_identity() -> anyhow::Result<SchemaIdentity> {
     .context("compiled xszs schema identity is invalid")
 }
 
-fn require_secure_database_file(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn require_secure_database_file(path: &Path) -> anyhow::Result<()> {
     require_real_parent(path)?;
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("SQLite database does not exist: {}", path.display()))?;
@@ -331,6 +311,29 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn a_working_connection_with_altered_schema_metadata_is_not_ready() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("current.sqlite3");
+        let url = format!("sqlite://{}", database.display());
+        initialize_current_database(&database).unwrap();
+        let pool = connect(&url).await.unwrap();
+        assert!(ready(&pool).await);
+        sqlx::query("UPDATE product_metadata SET schema_revision = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!ready(&pool).await);
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn current_schema_fingerprint_matches_compiled_contract() {

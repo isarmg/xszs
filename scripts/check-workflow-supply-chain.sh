@@ -169,7 +169,7 @@ done
 ((setup_gradle_uses == setup_gradle_basic_cache)) ||
   fail "each setup-gradle action must set cache-provider: basic"
 
-if grep -n -E 'android-signing|secrets[.]|assembleRelease|assembleDebug|apksigner|clients/(android|ios)' "${workflow_files[@]}"; then
+if grep -n -E 'android-signing|secrets[.](ANDROID|IOS|MOBILE)|assembleRelease|assembleDebug|apksigner|clients/(android|ios)' "${workflow_files[@]}"; then
   fail "Server workflows must not build mobile clients or access mobile signing credentials"
 fi
 

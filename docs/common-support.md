@@ -39,3 +39,5 @@ cargo tree --locked -e normal
 
 同时更新源码 revision、manifest、锁文件、调用代码和测试；Web 还需核对 tarball URL 与真实 SHA-512 integrity，并重新生成内嵌资源。
 遇到找不到模块或完整性错误，先对照同一版本的来源和锁文件，再按项目开发文档构建验证。最终源码、目标平台和实际发行物分别记录验收结果。
+
+Rust 输入固定为 xcss 1.0.13 / `b9b5858088510d0bf6832044353c92d09ee123fe`；Web 输入为 `https://github.com/isarmg/xcss/releases/download/v1.0.13/xcss-web-1.0.13.tgz`，锁文件 SHA512 integrity 固定为 `sha512-nqoi5uOqmrjH/2j3PXoi1bGVPucr+Rm1HzWiXjr2bhzJ6AgnlD1Y6AywKvIAZnOGIVg5RFi36aLc2vc5Srri9g==`。正式发行不使用本地路径补丁。

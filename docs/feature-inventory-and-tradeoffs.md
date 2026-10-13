@@ -61,7 +61,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-A-004 | 管理员密码只接受 xcss 当前 Argon2id 策略 | Admin Core、Admin Auth | 保障 | 高 | 产品不能另设 hash 分支 | PHC 参数与口令策略负例 |
 | MED-A-005 | 三个浏览器认证入口精确为 `/api/v1/auth/login`、`/api/v1/auth/session`、`/api/v1/auth/logout` | xcss path constants、`routes.rs` | 保障 | 中 | 路径漂移破坏共享客户端；别名扩大攻击面 | method/path 矩阵，合同外路径拒绝 |
 | MED-A-006 | 登录 body 精确 username/password，Session 使用平台五字段合同 | xcss Axum Adapter、Contracts | 保障 | 中 | 产品不能重解释认证结果 | strict DTO、401/403、ErrorEnvelope |
-| MED-A-007 | 管理员登录来源为真实 socket peer；固定来源/账户失败预算和 Argon2 并发等待上限 | xcss Admin Core | 保障 | 高 | 不能信任代理来源头或绕过平台预算 | 共享 Adapter 套件 |
+| MED-A-007 | 管理员登录不识别访客 IP；保留有界请求体读取与 Argon2 并发等待上限 | xcss Admin Core | 保障 | 高 | 密码验证和请求体不得耗尽服务全局容量 | 共享 Adapter 套件 |
 | MED-A-008 | 未知账户执行当前 dummy hash | xcss Admin Core | 保障 | 中 | 避免账户存在性时序差异 | dummy verification 测试 |
 | MED-A-009 | 管理 Session/CSRF token 只以摘要存储 | xcss Admin SQLite | 保障 | 高 | 产品不得另存明文 token | `_common_admin_sessions` 当前 DDL |
 | MED-A-010 | 固定每管理员 32、全局 1024 Session，空闲 30 分钟、绝对 12 小时 | xcss Admin Policy | 保障 | 高 | 无产品 TTL 配置或分叉限额 | 过期、上限、last_seen 写入节流 |
@@ -73,7 +73,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-A-017 | 移动业务 API 只接受已配对设备的 device token 或未撤销 API Key，解析到同一 account/device context；轮换或撤销实例同步撤销其 API Key | `auth::require_auth` | 核心 | 高 | 旧凭据可能在实例撤销后继续访问，或两个 token 类型产生不同隔离语义 | device/API key、revoked、disabled、跨账户 |
 | MED-A-018 | API Key 原值只在创建响应出现一次，库中存 hash/prefix，可列出和撤销 | `api_access.rs`、`api_keys` | 建议保留 | 高 | 自动化/额外客户端只能保存设备 token；明文保存会泄漏 | 创建、列表不含 token、撤销、last_used |
 | MED-A-019 | `/metrics` 使用与其他身份分离的可选 Bearer `METRICS_TOKEN` | `metrics.rs`、Config | 保障 | 中 | 聚合容量可被公开，或监控被迫保存 Administrator Cookie | 无/错/对 token；空配置语义 |
-| MED-A-020 | 可信代理解析从 socket peer 开始，最多 32 个转发 hop；未可信 peer 的头不生效 | `trusted_proxy.rs` | 保障 | 高 | 业务客户端 IP 可被伪造 | trusted/untrusted、XFF 顺序、IPv4-mapped IPv6、超限 |
+| MED-A-020 | 配对只对数据库确认的待配对实例计数，无效授权码不创建限额项；匿名请求共用有界工作池 | `login_admission.rs`、`routes.rs` | 保障 | 高 | 随机输入耗尽实例限额状态 | 无效授权码、实例隔离、工作池容量 |
 | MED-A-021 | TLS 由外部入口负责；生产 Cookie 使用 Secure，X-Forwarded-Proto 不决定传输安全 | `router`、`development` | 保障 | 高 | 安全部署边界必须由入口与防火墙保证 | Cookie 属性、伪造转发头不影响启动/业务 |
 | MED-A-022 | 所有 HTTP 错误统一 xcss `ErrorEnvelope`，429 保留 `Retry-After` | `error.rs`、`xcss::error` | 保障 | 中 | React/移动端需要项目专用错误分支，或内部文本泄漏 | 400/401/403/404/409/429/500 exact keys |
 
@@ -83,7 +83,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 |---|---|---|---|---|---|---|
 | MED-U-001 | 唯一移动 HTTP base 为 `/v1`，上传 DTO 使用 `deny_unknown_fields` | `crates/protocol`、`routes.rs` | 核心 | 高 | 三端 wire 漂移或歧义 JSON 被接受 | 全 DTO 正反 fixture、合同外 route |
 | MED-U-002 | create upload 明确声明 source IDs、media kind、资源 role、文件名、MIME、时间、encoding、总 Hash/size、metadata 和 parts | `CreateUploadRequest` | 核心 | 高 | Server 无法重建资产/资源或校验完整性 | 每字段缺失/类型/unknown、完整 round trip |
-| MED-U-003 | 只接受 `plain-v1` storage encoding | `StorageEncoding`、Schema CHECK | 保障 | 高 | 多 encoding 会要求下载、doctor 和恢复分支 | 非当前枚举拒绝；DB CHECK |
+| MED-U-003 | 只接受 `plain-v1` storage encoding | `StorageEncoding`、Schema CHECK | 保障 | 高 | 多 encoding 会要求下载、离线检查和恢复分支 | 非当前枚举拒绝；DB CHECK |
 | MED-U-004 | manifest body 最大 1 MiB（最多 4096 块），普通 JSON 最大 256 KiB，metadata 最大 64 KiB | `routes::router`、`validate_upload_request` | 保障 | 中 | 超大 manifest/metadata 可耗尽内存和 DB | 边界、超限、非法 JSON、连接恢复 |
 | MED-U-005 | parts 必须从 0 连续编号、非空、每块不超过 `MAX_PART_BYTES`，sizes 总和等于 content size | `validate_upload_request` | 保障 | 高 | 缺块、重叠或溢出会导致错误拼装 | 空文件、零块、gap、overflow、超大 part |
 | MED-U-006 | 每块和完整对象使用 64 hex BLAKE3 | Client `crates/crypto`、Server storage/commit | 保障 | 高 | 传输损坏、错序和去重碰撞无法被当前流程识别 | 大小写 hex、错误 part、错误 full hash、篡改 |
@@ -98,9 +98,9 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-U-015 | final object 与 stage 位于同一受控文件系统，以 no-replace `linkat` 发布同一 inode、核对 device+inode 后 fsync 目标父目录 | `RootedFs::link_no_replace`、`CommitKeys` | 保障 | 高 | 可覆盖 winner、发布错误实体或在崩溃后丢目录项 | `EEXIST`、identity swap、fsync 故障；不是 rename |
 | MED-U-016 | metadata commit 有 blob 唯一竞争重试，最终 resource upsert 幂等 | `commit_metadata_with_race_retry`、unique index | 保障 | 高 | 并发相同内容会报随机冲突或重复 blob | 双 complete、唯一约束 race、返回 deduplicated |
 | MED-U-017 | commit 前再次核对 storage path、quota 和对象身份 | `begin_commit`、`ensure_commit_quota` | 保障 | 高 | 上传期间修改存储策略后仍可越权提交 | path change、quota shrink |
-| MED-U-018 | `run` 启动时先 reconcile 未完成 commits、遗留 committed stage 与无引用 blob，之后每 120 秒重复且跳过错过 tick；周期任务不重新 Hash 已完成历史 blob。`reconcile scan` 提供持锁手工入口，无法证明的未完成状态标 unknown 而非伪成功 | `upload_commit::reconcile_all`、`main.rs` | 保障 | 高 | 崩溃后的 stage/final/DB 组合或待回收 blob 会永久卡住；反复扫描历史内容会造成随数据量增长的固定负载 | commit_started/finalizing 各物理组合、committed stage 清理、历史资源版本、orphan blob、周期/手工重试；后台协调任务由 xcss runtime 监督并按统一有界停止规则回收 |
+| MED-U-018 | 服务启动时先协调 未完成 commits、遗留 committed stage 与无引用 blob，之后每 120 秒重复且跳过错过 tick；周期任务不重新 Hash 已完成历史 blob。后台周期与启动共享协调路径，无法证明的未完成状态标 unknown 而非伪成功 | `upload_commit::reconcile_all`、`lib.rs` | 保障 | 高 | 崩溃后的 stage/final/DB 组合或待回收 blob 会永久卡住；反复扫描历史内容会造成随数据量增长的固定负载 | commit_started/finalizing 各物理组合、committed stage 清理、历史资源版本、orphan blob、启动/周期重试；后台协调任务由 xcss runtime 监督并按统一有界停止规则回收 |
 | MED-U-019 | rooted filesystem 拒绝绝对路径、`.`/`..`、symlink、特殊文件和账户根逃逸 | `rooted_fs.rs`、`storage.rs` | 保障 | 高 | 上传或下载可越出 `DATA_DIR` | symlink/rename race、FIFO、嵌套账户路径；当前发布会受控创建 hardlink，数据根须独占写权限 |
-| MED-U-020 | account storage paths 全局唯一且不得互相包含，保留 `uploads` 内部目录 | `admin.rs`、doctor | 保障 | 高 | 两个账户可能读写同一物理树 | equal/parent/child/reserved、并发管理变更 |
+| MED-U-020 | account storage paths 全局唯一且不得互相包含，保留 `uploads` 内部目录 | `admin.rs` | 保障 | 高 | 两个账户可能读写同一物理树 | equal/parent/child/reserved、并发管理变更 |
 | MED-U-021 | resource content 按授权 account 打开 blob，流式返回 Content-Length/MIME 和 encoding header | `resource_content` | 核心 | 高 | 无法恢复原始媒体，或可跨账户读取 | own/cross account、missing file、large stream、Content-Length |
 
 ## 5. 图库、同步、审计与业务 API
@@ -113,7 +113,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-L-004 | sync 使用 account 自增 sequence，limit 1–1000，返回 next_sequence/has_more | `account_changes`、`sync_changes` | 核心 | 高 | 客户端只能反复全量读取或漏变更 | 空页、多页、并发变更、跨账户 |
 | MED-L-005 | 收藏/归档为 asset 布尔状态，PATCH 只改变明确提供字段并记录 change/audit | `update_asset` | 建议保留 | 中 | 备份仍在但无法做基础整理 | 单字段/双字段/空 patch、CSRF不适用数据面 token |
 | MED-L-006 | trash/restore 通过明确动作改变 deleted_at；普通列表隐藏 trash | `trash_asset`、`restore_asset` | 建议保留 | 高 | 只能直接永久删或永不删除，误删保护下降 | 重复动作、timeline trashed、change event |
-| MED-L-007 | 永久删除只允许 trashed asset；先在同一事务删除 asset/resource、写 change/audit，让无引用 blob 行成为 durable 回收意图，再以 rooted unlink 与 blob-row DELETE 的同一 SQLite 事务收口。物理回收完成返回 204，仍待协调返回 202 | `delete_asset_permanently`、`reconcile_orphan_blobs` | 保障 | 高 | 可绕过回收步骤、误删仍被其他 resource 引用的 blob，或在 unlink 失败后留下数据库无法追踪的对象 | 非 trash、最后/非最后引用、unlink 失败回滚保留行、202、启动/120 秒/`reconcile scan` 重试、commit-after-unlink failure |
+| MED-L-007 | 永久删除只允许 trashed asset；先在同一事务删除 asset/resource、写 change/audit，让无引用 blob 行成为 durable 回收意图，再以 rooted unlink 与 blob-row DELETE 的同一 SQLite 事务收口。物理回收完成返回 204，仍待协调返回 202 | `delete_asset_permanently`、`reconcile_orphan_blobs` | 保障 | 高 | 可绕过回收步骤、误删仍被其他 resource 引用的 blob，或在 unlink 失败后留下数据库无法追踪的对象 | 非 trash、最后/非最后引用、unlink 失败回滚保留行、202、启动/120 秒周期重试、commit-after-unlink failure |
 | MED-L-008 | 相册按 account+device+source_album_id 同步，支持 replace_members 显式语义 | `sync_album`、Android/iOS scanner | 建议保留 | 高 | 设备相册关系无法保留；错误 replace 会删掉未扫描成员 | full/limited scan、空 album、不同 device |
 | MED-L-009 | 标签按账户唯一，同名创建幂等复用（首次 201，已有 200），每个资产最多 16 个不同标签，支持创建、全量 set、单 asset add/remove | `tags`、`tag_assets` routes | 可选 | 中 | 核心备份不受影响，但人工整理能力下降 | 名称边界、跨账户 ID、16/17 边界、重复关系、整批回滚、并发最后名额 |
 | MED-L-010 | duplicate groups 按账户内 content BLAKE3+size，limit 1–200 | `duplicate_groups` | 可选 | 中 | 无法发现字节相同媒体；仍不会做视觉相似判断 | 同/异账户、同 hash/size、分页上限 |
@@ -135,7 +135,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
 | MED-W-001 | xcss Shell 统一 restore/login/logout、导航、通知与诊断，Session/CSRF 只在内存；产品没有第二套登录状态机 | `createXcssAdminApplication`、`@xcss/web/admin-shell` | 保障 | 高 | 认证竞态或 Secret 持久化 | 共享 Shell 测试、消费者 Chromium/Firefox 验收 |
-| MED-W-002 | 统一完整有序实例列表、详细信息和日志视图；实例列表按 NOCASE/原名/UUID 排序并以每页 50 条正反 keyset 遍历，全局统计来自 SQL 聚合，详情独立按 ID 读取；日志默认显示 Server 当天，按 Server 本地日期范围（包含起止当天）和实例筛选；年月日数字直接编辑、回车应用，前后端拒绝非法日期和倒置范围，以每页 50 条正反游标遍历全部审计记录；管理员账号仅由 xcss Shell 右上角人物图标设置；业务读取失败清除旧数据，安全错误显示 Request ID 和显式重试 | `Application`、`OverviewView`、`UserDetailsView`、`LogsView` | 建议保留 | 中 | 身份域混淆或失败后仍显示过期状态 | 125 同名实例三页、全局统计、独立详情、创建/删除后复核、超过 200 条同时间日志完整翻页、坏游标、实例过滤与日期边界、失败/重试、账号设置、无内部错误泄漏 |
+| MED-W-002 | 统一完整有序实例列表、详细信息和日志视图；实例列表按 NOCASE/原名/UUID 排序并以每页 50 条正反 keyset 遍历，全局统计来自 SQL 聚合，详情独立按 ID 读取；日志默认显示 UTC 当天，按 UTC 日历日期范围（包含起止当天）和实例筛选；年月日数字直接编辑、回车应用，前后端拒绝非法日期和倒置范围，以每页 50 条正反游标遍历全部审计记录；管理员账号仅由 xcss Shell 右上角人物图标设置；业务读取失败清除旧数据，安全错误显示 Request ID 和显式重试 | `Application`、`OverviewView`、`UserDetailsView`、`LogsView` | 建议保留 | 中 | 身份域混淆或失败后仍显示过期状态 | 125 同名实例三页、全局统计、独立详情、创建/删除后复核、超过 200 条同时间日志完整翻页、坏游标、实例过滤与日期边界、失败/重试、账号设置、无内部错误泄漏 |
 | MED-W-003 | 总览聚合 total instance、used/pending/quota 和每实例资源数；在线数由实例列表统一计算 | `/api/v1/admin/overview`、Overview guard | 建议保留 | 中 | 容量和实例状态只能手工查询 | unlimited quota、large safe integer、空库 |
 | MED-W-004 | 新建按钮直接创建永久启用的默认名称实例，原子创建自动存储、默认配额和客户端授权码；详情以实例名称、只读实例 ID 和实例授权码展示配对信息；授权码可查看和轮换，实例可取消并在终态删除整个空实例；GiB 配额在详情页编辑并换算为整数字节 | `Application`、`BackupUserForm`、`InstanceManager` | 核心 | 高 | 首次配对重新暴露基础设施参数、部分成功留下孤立归属或授权未真正撤销 | direct default create、默认值、实例配对/轮换/删除、精确 quota |
 | MED-W-005 | 业务 JSON 在进入组件前校验必需字段与类型，路径只允许 `/api/v1/admin/*` | `web/src/api.ts` | 保障 | 中 | 漂移响应会进入组件，或产品 client 被用于移动路由 | 缺失/错误类型、错误 prefix；当前 guard 容忍响应额外字段 |
@@ -144,26 +144,26 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-W-008 | 业务 CSS 仅保留 `.media-*` 布局，导航/表单/弹窗/通知来自共享 UI，字体使用 Maple 同源资产 | `web/src/styles.css`、xcss CSS imports | 建议保留 | 中 | 重复平台样式重新分叉 | 禁止私有字体/token、窄屏、长文本、progress |
 | MED-W-009 | 精确 Node 26.7.0、React/DOM 19.3.0、TS 7.0.2、Vite 8.3.3 | `.node-version`、package/lock | 开发运维 | 中 | 开发、CI 与发行 bundle 不可复现 | engine、`npm ci`、typecheck、版本断言 |
 | MED-W-010 | `build` 强制 check:xcss→typecheck→xcss Vite 配置，512 KiB 单资产硬预算且禁止 source map；完整 dist 资产包含字体与许可 | package scripts、vite config | 开发运维 | 高 | 二进制、字体和发行 manifest 混代 | 构建门禁、实际 dist 浏览器测试 |
-| MED-W-011 | xcss 自动生成内嵌清单绑定 HTML/JS/CSS/WOFF2/许可证；发行只附清单，HTTP 与校验共用 binary 字节，保留 CSP 和 nosniff | `web_assets.rs`、`admin.rs`、`release.rs` | 保障 | 高 | 字体 404、缺少许可证或发布内容漂移 | 全清单实际 HTTP 字节/类型、HEAD/ETag、篡改/重写清单拒绝 |
+| MED-W-011 | xcss 自动生成内嵌清单绑定 HTML/JS/CSS/WOFF2/许可证；发行只附清单，HTTP 与校验共用 binary 字节，保留 CSP 和 nosniff | `web_assets.rs`、`admin.rs`、XSSI `package.py` | 保障 | 高 | 字体 404、缺少许可证或发布内容漂移 | 全清单实际 HTTP 字节/类型、HEAD/ETag、篡改/重写清单拒绝 |
 
-## 8. SQLite、运行锁、doctor、发布与供应链
+## 8. SQLite、运行锁、离线检查、发布与供应链
 
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
 | MED-R-001 | Server 软件为 1.0.3，数据库 Schema identity 为 xszs 1.0.0、revision 1、SHA `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`；管理员和平台 DDL 由 xcss 组合 | `database.rs`、`schema/generated/current_schema.sql` | 保障 | 高 | 错库或 DDL drift 必须拒绝 | metadata、现场 fingerprint、当前身份精确校验 |
-| MED-R-003 | Server 数据库先复制 main/WAL/journal 私有 generation，再验证 source 未变化 | `crates/server/src/database.rs` | 保障 | 高 | 启动验证可能读取跨时刻混合状态或写源库 | WAL、并发变化、symlink、cleanup |
-| MED-R-004 | Server open 使用 WAL、foreign keys、busy timeout，并在业务前做 integrity/FK | `database.rs`、doctor | 保障 | 高 | 并发/损坏行为变得不可预测 | PRAGMA、busy 5s、corruption、FK violation |
+| MED-R-003 | Server 持完整运行锁后仅复制一次 main/WAL/journal 私有 generation，源未变化确认后在同一快照上完成 schema、integrity、FK、管理员和业务授权检查 | `crates/server/src/database.rs` | 保障 | 高 | 启动验证可能读取跨时刻混合状态或写源库 | WAL、并发变化、symlink、cleanup |
+| MED-R-004 | Server open 使用 WAL、foreign keys、busy timeout，离线 setup 做 integrity/FK 校验 | `database.rs`、`offline.rs` | 保障 | 高 | 并发/损坏行为不可预测 | PRAGMA、corruption、FK violation |
 | MED-R-005 | runtime lock 同时绑定数据库与 DATA_DIR，防止两个 Server 管同一状态 | `runtime_lock.rs` | 保障 | 高 | 双实例可同时提交、清理和改账户路径 | 同 DB/不同 data、同 data/不同 DB、symlink/hardlink |
-| MED-R-006 | doctor 校验 Schema、integrity/FK、rollback write probe、storage write cleanup，为数据树普通文件计算 Hash 后核对 DB blob、durable part 与 active commit，并拒绝尚未收口的无引用 blob 行 | `doctor.rs` | 开发运维 | 高 | 上线与故障只能靠零散检查，损坏 blob 或待回收意图可能长期潜伏 | missing/mutated、unknown commit、orphan blob、read-only；先运行 `reconcile scan` 再复查 |
+| MED-R-006 | 独立签名 setup 只读核对现行 Schema、完整性、管理员及实例密文；HTTP 运行期间提交和读取验证实际内容 | `offline.rs`、`storage.rs` | 开发运维 | 高 | 损坏事实可能遗漏 | 源字节/mtime不变、wrong schema、wrong key |
 | MED-R-007 | `/healthz` 为最小存活检查；`/readyz` 检查 DB/storage；详细诊断要求管理员 | xcss Runtime | 开发运维 | 中 | 负载均衡需区分可响应与可写服务 | 匿名无内部信息、诊断认证、任务监督 |
 | MED-R-008 | Prometheus 文本只暴露聚合 user/device/resource/bytes/upload 指标 | `metrics.rs` | 开发运维 | 中 | 容量不可监控；若加 labels 不慎会泄漏用户名/路径 | content type、token、无高基数/Secret |
-| MED-R-009 | release identity 绑定 source revision、target、API、encoding、Schema 与 Web bytes | `release.rs` | 保障 | 高 | 二进制与 Web 可混代 | identity JSON/contract hash、单字段篡改 |
-| MED-R-010 | 全树 manifest 精确约束文件、mode、size、SHA，拒绝额外/缺失/链接 | `release.rs`、manifest writer | 保障 | 高 | 安装树内容无法证明 | missing/extra/tamper/symlink/hardlink/mode |
-| MED-R-011 | 正式 binary 可从普通安装路径 `run --config PATH`；制品验证为显式离线操作 | `main`、`release` | 保障 | 中 | 运行配置与下载校验保持清晰边界 | 复制 binary 到普通路径后启动、完整制品显式验证 |
-| MED-R-012 | `build-server-release.sh` 只在 Linux AMD64 接受 64-bit little-endian x86_64 ELF | release script | 开发运维 | 中 | 文件名 target 与真实 ELF 可不一致 | ELF magic/class/endian/machine、wrong host |
-| MED-R-013 | 发行包包含 binary、配置样例、`deploy/xszs.service` 映射出的 systemd、脚本、Web 和必要文档 | build script | 开发运维 | 高 | 操作者拿到不完整或跨代部署单元 | expected exact layout、真实 verify-release |
-| MED-R-014 | systemd 使用 isarmg-xszs 账户、私有 `/etc/isarmg/xszs/config.json`、RuntimeDirectory 与基于所选状态路径的写入许可 | `deploy/xszs.service`、install.sh | 保障 | 高 | 错账户或权限扩大主机攻击面 | unit 校验、实际 start、写入路径 |
-| MED-R-015 | `install.sh setup CONFIG_JSON [USERNAME]` 安装并执行 init/check，不启动；upgrade 保留配置和状态，按原运行状态恢复 | `install.sh`、deployment tests | 保障 | 高 | 升级误初始化或换密钥破坏实例 | 首装、已有实例拒绝、升级保持密钥/数据库、离线不创建 /run |
+| MED-R-009 | 同次构建导出 source revision、target、现行 Schema 与 Web 清单，XSSI 签名包 metadata | `build.rs`、XSSI | 保障 | 高 | 不同代制品可混用 | 签名与身份一致、精确pin |
+| MED-R-010 | XSSI 签名清单约束文件、mode、size、SHA，拒绝额外/缺失/链接 | XSSI `package.py` | 保障 | 高 | 安装树内容无法证明 | missing/extra/tamper/symlink/hardlink/mode |
+| MED-R-011 | 正式 binary 只接受 `--root ROOT` 运行，包验证在执行任何候选 ELF 前完成 | `main.rs`、XSSI | 保障 | 中 | 下载校验与运行职责不清 | 移除命令拒绝、只读check、验签先于setup |
+| MED-R-012 | product build 与独立 setup 限 Linux AMD64；包实际 ELF 与签名 metadata 一致 | target gate、XSSI | 开发运维 | 中 | 文件名与真实运行平台不一致 | wrong target、ELF检查 |
+| MED-R-013 | 发行包包含 binary、配置样例、XSSI 统一模板生成的 systemd、脚本、Web 和必要文档 | build script | 开发运维 | 高 | 操作者拿到不完整或跨代部署单元 | expected exact layout、签名元数据与逐文件完整性校验 |
+| MED-R-014 | XSSI 统一 systemd 模板，以 isarmg-xszs 运行，配置/logs/run都由ROOT派生，业务状态允许显式外置 | XSSI templates/install | 保障 | 高 | 错账户或权限扩大主机范围 | unit escaping、service identity、writable_paths |
+| MED-R-015 | 安装脚本初始化；升级先下载验签，再停服、XSSC备份/明确迁移/替换、启动和就绪检查，失败恢复 | XSSI、XSSC | 保障 | 高 | 误初始化或换密钥破坏实例 | 初装、并发、升级/回滚、密钥与账号保持 |
 | MED-R-016 | 本仓库 CI 覆盖 Rust、管理 Web、协议与 Server 发行；移动端 CI 属于 Client 仓库 | `.github/workflows`、`scripts/` | 开发运维 | 高 | 任一平台可在 wire/FFI 漂移时独立发布 | clean checkout jobs、平台矩阵、lock mode |
 | MED-R-017 | Rust 固定 1.99.0；Web Node/toolchain 与 Cargo/npm locks 均固定 | toolchain/version/lock files | 开发运维 | 中 | 解析随时间变化，制品难复现 | `--locked`、`npm ci`、version output |
 | MED-R-018 | 中文 README、学习、流程、功能取舍和运维文档是发行/维护闭包 | `README.md`、`docs/` | 开发运维 | 低 | 跨五种语言/平台的知识只能口头传递 | 链接、命令、代码锚点和 schema hash 抽查 |
@@ -174,7 +174,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 |---|---|---|---|---|---|---|
 | MED-X-001 | 不提供 Server ARM/musl/Windows/macOS；移动客户端仍支持各自正式 ABI | compile/release/runtime gates | 核心 | 高 | Server 扩平台需重做文件系统、systemd、脚本和发行证明 | 新平台完整 CI、真实部署、等价安全测试 |
 | MED-X-002 | 不提供桌面同步客户端或双向文件夹镜像 | 无 desktop client/conflict Schema | 核心 | 高 | 会引入文件名、冲突、删除传播和任意文件类型模型 | 独立产品 RFC、冲突状态机、多平台矩阵 |
-| MED-X-003 | 不提供端到端加密；Server 管理员可读取媒体 | `plain-v1` | 核心 | 高 | E2EE 会改变 key recovery、缩略图、去重、doctor 和恢复 | 双端密钥生命周期、灾备、不可恢复风险设计 |
+| MED-X-003 | 不提供端到端加密；Server 管理员可读取媒体 | `plain-v1` | 核心 | 高 | E2EE 会改变 key recovery、缩略图、去重、离线检查和恢复 | 双端密钥生命周期、灾备、不可恢复风险设计 |
 | MED-X-004 | 服务端支持受限图片解码和 JPEG 派生预览；不提供视频转码或 RAW 派生 | `media_delivery.rs`、`image` | 核心 | 高 | 扩大支持范围需要额外解码预算、格式验证与派生资源生命周期管理 | sandbox、资源预算、job recovery、供应链 |
 | MED-X-005 | 不提供人脸识别、语义搜索、地图或视觉相似去重 | 无 model/index Schema | 可选 | 高 | 增加生物特征隐私、模型版本和索引删除责任 | 明示同意、模型 SBOM、删除/重建、算力预算 |
 | MED-X-006 | 不提供公开分享链接或跨账户协作 | 所有资源 route 绑定 account auth | 核心 | 高 | 需要公开 token、撤销、滥用控制和新的授权关系 | threat model、限流、审计、有效期 |

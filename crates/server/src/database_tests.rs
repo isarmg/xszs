@@ -3,7 +3,6 @@ use std::{path::Path, path::PathBuf, str::FromStr};
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ConnectInfo,
     http::{Method, Request, Response, StatusCode, header},
     response::IntoResponse,
 };
@@ -126,6 +125,7 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
         .await
         .expect("create test storage");
     let config = Config {
+        root: database.parent().unwrap().join("root"),
         database_url,
         data_dir: database.parent().unwrap().to_path_buf(),
         storage_dir: data.to_path_buf(),
@@ -133,11 +133,10 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
         bind: "127.0.0.1:0".parse().expect("test bind address"),
         max_part_bytes: 1024 * 1024,
         upload_global_concurrency: 16,
-        upload_per_account_concurrency: 4,
+        upload_per_instance_concurrency: 4,
         metrics_token: None,
         development: true,
         development_web_dir: None,
-        trusted_proxies: xcss::client_ip::TrustedProxies::parse(&[]).unwrap(),
         sources: Default::default(),
     };
     use std::os::unix::fs::PermissionsExt as _;
@@ -160,12 +159,15 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
             .bootstrap_administrator(
                 ADMIN_USERNAME,
                 ADMIN_PASSWORD,
-                crate::current_time_micros().unwrap(),
+                crate::offline::current_time_micros().unwrap(),
             )
             .await
             .unwrap();
     }
-    let state = crate::build_state(&config, pool.clone(), storage)
+    let credentials_key = crate::secrets::load(&config.data_dir)
+        .unwrap()
+        .credentials_key;
+    let state = crate::build_state(&config, pool.clone(), storage, &credentials_key)
         .await
         .expect("build xcss-backed test state");
     upload_commit::reconcile_all(&state)
@@ -321,15 +323,9 @@ fn json_request(
             .header(header::COOKIE, cookie)
             .header("x-csrf-token", csrf);
     }
-    let mut request = builder
+    builder
         .body(Body::from(body.to_string()))
-        .expect("build JSON request");
-    request.extensions_mut().insert(ConnectInfo(
-        "127.0.0.1:41000"
-            .parse::<std::net::SocketAddr>()
-            .expect("test peer address"),
-    ));
-    request
+        .expect("build JSON request")
 }
 
 fn authorized_request(
@@ -773,6 +769,21 @@ async fn v02_wire_is_strict_across_the_real_sqlite_file_flow_and_restart() {
                 .expect("instance lifecycle account count"),
             expected_accounts
         );
+    }
+    for _ in 0..12 {
+        let unknown = format!("{}0000", Uuid::new_v4().simple());
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/v1/auth/bootstrap",
+                json!({"authorization_code":unknown,"device_name":"Unknown","platform":"test"}),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
     let bootstrap = json_body(
         send(
@@ -2118,13 +2129,7 @@ async fn upload_commit_recovers_every_durable_crash_boundary_after_restart() {
             blobs_before, expected_metadata,
             "quota-bearing blob must appear exactly with the proven metadata transaction"
         );
-
-        let config = state.config.clone();
         close_test_state(state, pool).await;
-        tokio::task::spawn_blocking(move || crate::doctor::run(&config))
-            .await
-            .unwrap()
-            .expect("durable crash boundaries must remain diagnosable");
         (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
         let commit_state: String =
             sqlx::query_scalar("SELECT commit_state FROM uploads WHERE id = ?")
@@ -2173,8 +2178,24 @@ async fn upload_commit_serializes_retries_and_deduplicates_concurrent_uploads() 
         upload_commit::complete(&first_state, upload_id, account_id),
         upload_commit::complete(&second_state, upload_id, account_id),
     );
-    let first = first.expect("first retry completes");
-    let second = second.expect("second retry is idempotent");
+    let first = match first {
+        Ok(value) => value,
+        Err(error) => {
+            assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+            upload_commit::complete(&state, upload_id, account_id)
+                .await
+                .unwrap()
+        }
+    };
+    let second = match second {
+        Ok(value) => value,
+        Err(error) => {
+            assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+            upload_commit::complete(&state, upload_id, account_id)
+                .await
+                .unwrap()
+        }
+    };
     assert_eq!(first.resource_id, second.resource_id);
 
     let upload_two =
@@ -2193,8 +2214,18 @@ async fn upload_commit_serializes_retries_and_deduplicates_concurrent_uploads() 
         upload_commit::complete(&state_two, upload_two, account_id),
         upload_commit::complete(&state_three, upload_three, account_id),
     );
-    two.expect("first concurrent content commit");
-    three.expect("second concurrent content commit");
+    if let Err(error) = two {
+        assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+        upload_commit::complete(&state, upload_two, account_id)
+            .await
+            .unwrap();
+    }
+    if let Err(error) = three {
+        assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+        upload_commit::complete(&state, upload_three, account_id)
+            .await
+            .unwrap();
+    }
     let blob_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM blobs WHERE account_id = ? AND content_blake3 = ?",
     )
@@ -2267,13 +2298,7 @@ async fn committed_history_survives_resource_updates_and_is_not_a_recovery_scan(
         .await
         .expect("historical receipt remains independently verifiable");
     assert_eq!(retried.resource_id, first.resource_id);
-
-    let config = state.config.clone();
     close_test_state(state, pool).await;
-    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
-        .await
-        .unwrap()
-        .expect("valid historical receipts must pass doctor after replacement");
     let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
 
     let first_object: String =
@@ -2440,12 +2465,145 @@ async fn deleting_completed_asset_reclaims_orphan_upload_parts() {
             .exists(),
         "cleanup must preserve the existing commit lock inode"
     );
-    let config = state.config.clone();
     close_test_state(state, pool).await;
-    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
+}
+
+#[tokio::test]
+async fn asset_deletion_preserves_a_published_upload_until_recovery_finishes() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account_id, device_id) =
+        seed_account(&pool, "blobs/delete-published", "delete-published").await;
+    let upload_id = seed_received_upload(
+        &state,
+        account_id,
+        device_id,
+        b"published-before-delete",
+        "delete-published",
+    )
+    .await;
+    upload_commit::complete_with_failpoint(
+        &state,
+        upload_id,
+        account_id,
+        upload_commit::CommitFailpoint::Published,
+    )
+    .await
+    .expect_err("the crash boundary must leave recovery intent");
+    let (asset_id, final_key): (Uuid, String) =
+        sqlx::query_as("SELECT asset_id,commit_final_key FROM uploads WHERE id = ?")
+            .bind(upload_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let final_object = workspace.data().join(final_key);
+    assert!(final_object.exists());
+    sqlx::query("UPDATE assets SET deleted_at = datetime('now') WHERE id = ?")
+        .bind(asset_id)
+        .execute(&pool)
         .await
-        .unwrap()
-        .expect("the remaining database and files must pass doctor");
+        .unwrap();
+    let auth = AuthContext {
+        account_id,
+        device_id,
+        actor_kind: "device".into(),
+        actor_id: device_id,
+        credential_hash: vec![],
+    };
+    let blocked = library::delete_asset_permanently(
+        axum::extract::State(state.clone()),
+        axum::extract::Extension(auth.clone()),
+        xcss::server_cli::ContractPath(asset_id),
+        xcss::server_cli::ContractJson(xszs_protocol::EmptyRequest {}),
+    )
+    .await
+    .expect_err("deletion must retain the only published-object recovery receipt");
+    assert_eq!(blocked.into_response().status(), StatusCode::CONFLICT);
+    assert!(final_object.exists());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM uploads WHERE id = ?")
+            .bind(upload_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let report = upload_commit::reconcile_all(&state).await.unwrap();
+    assert_eq!(report.recovered, 1);
+    assert_eq!(report.errors, 0);
+    let deleted = library::delete_asset_permanently(
+        axum::extract::State(state.clone()),
+        axum::extract::Extension(auth),
+        xcss::server_cli::ContractPath(asset_id),
+        xcss::server_cli::ContractJson(xszs_protocol::EmptyRequest {}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted, StatusCode::NO_CONTENT);
+    assert!(!final_object.exists());
+    close_test_state(state, pool).await;
+}
+
+#[tokio::test]
+async fn orphan_part_cleanup_spans_batches_and_never_follows_directory_links() {
+    use std::os::unix::fs::MetadataExt as _;
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account_id, device_id) = seed_account(&pool, "blobs/batch-cleanup", "batch-cleanup").await;
+    let retained =
+        seed_received_upload(&state, account_id, device_id, b"retained", "retained-batch").await;
+    let mut directories = Vec::new();
+    for _ in 0..300 {
+        let directory = workspace
+            .data()
+            .join("uploads")
+            .join(Uuid::new_v4().to_string());
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("00000000.part"), b"orphan").unwrap();
+        std::fs::write(directory.join("commit.lock"), b"lock inode").unwrap();
+        let inode = std::fs::metadata(directory.join("commit.lock"))
+            .unwrap()
+            .ino();
+        directories.push((directory, inode));
+    }
+    let outside = tempfile::tempdir().unwrap();
+    let outside_part = outside.path().join("00000000.part");
+    std::fs::write(&outside_part, b"outside content").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        workspace
+            .data()
+            .join("uploads")
+            .join(Uuid::new_v4().to_string()),
+    )
+    .unwrap();
+    let (removed, errors) = upload_commit::reconcile_orphan_upload_parts(&state)
+        .await
+        .unwrap();
+    assert_eq!((removed, errors), (300, 0));
+    for (directory, inode) in directories {
+        assert!(!directory.join("00000000.part").exists());
+        assert_eq!(
+            std::fs::metadata(directory.join("commit.lock"))
+                .unwrap()
+                .ino(),
+            inode
+        );
+    }
+    assert!(
+        workspace
+            .data()
+            .join(format!("uploads/{retained}/00000000.part"))
+            .exists()
+    );
+    assert_eq!(std::fs::read(outside_part).unwrap(), b"outside content");
+    assert_eq!(
+        upload_commit::reconcile_orphan_upload_parts(&state)
+            .await
+            .unwrap(),
+        (0, 0)
+    );
+    close_test_state(state, pool).await;
 }
 
 #[tokio::test]
@@ -2513,12 +2671,7 @@ async fn late_older_upload_cannot_replace_a_newer_deduplicated_resource() {
     .unwrap();
     assert_eq!(visible_hash, blake3::hash(b"newer").to_hex().to_string());
     drop(app);
-    let config = state.config.clone();
     close_test_state(state, pool).await;
-    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
-        .await
-        .unwrap()
-        .expect("deduplicated receipts must satisfy offline consistency checks");
 }
 
 #[tokio::test]

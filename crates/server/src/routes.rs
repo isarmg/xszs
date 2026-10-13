@@ -48,6 +48,7 @@ pub struct AppState {
     pub config: Config,
     pub login_admission: LoginAdmission,
     pub upload_admission: UploadAdmission,
+    pub completion_admission: UploadAdmission,
     pub administrator:
         Arc<xcss::admin_core::AdministratorService<xcss::admin_sqlite::SqliteAdministratorStore>>,
     pub administrator_origin: xcss::admin_auth::AdministratorOriginMode,
@@ -56,50 +57,83 @@ pub struct AppState {
 #[derive(Clone)]
 pub struct UploadAdmission {
     global: std::sync::Arc<Semaphore>,
-    per_account_limit: usize,
-    accounts: std::sync::Arc<
+    per_instance_limit: usize,
+    instances: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Weak<Semaphore>>>,
     >,
 }
 
-struct UploadPermit {
+pub(crate) struct UploadPermit {
     _global: OwnedSemaphorePermit,
-    _account: OwnedSemaphorePermit,
+    _instance: OwnedSemaphorePermit,
 }
 
 impl UploadAdmission {
-    pub fn new(global_limit: usize, per_account_limit: usize) -> Self {
+    pub fn new(global_limit: usize, per_instance_limit: usize) -> Self {
         Self {
             global: std::sync::Arc::new(Semaphore::new(global_limit)),
-            per_account_limit,
-            accounts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            per_instance_limit,
+            instances: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
-    async fn acquire(&self, account_id: Uuid) -> Result<UploadPermit, AppError> {
-        let account = {
-            let mut accounts = self
-                .accounts
+    pub(crate) fn try_acquire(&self, instance_id: Uuid) -> Result<UploadPermit, AppError> {
+        let global = self.global.clone().try_acquire_owned().map_err(|_| {
+            AppError::too_many_requests_with_message(1, "completion capacity is busy")
+        })?;
+        let instance = {
+            let mut instances = self
+                .instances
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            accounts.retain(|_, semaphore| semaphore.strong_count() > 0);
-            if let Some(semaphore) = accounts.get(&account_id).and_then(std::sync::Weak::upgrade) {
+            instances.retain(|_, semaphore| semaphore.strong_count() > 0);
+            match instances
+                .get(&instance_id)
+                .and_then(std::sync::Weak::upgrade)
+            {
+                Some(semaphore) => semaphore,
+                None => {
+                    let semaphore = Arc::new(Semaphore::new(self.per_instance_limit));
+                    instances.insert(instance_id, Arc::downgrade(&semaphore));
+                    semaphore
+                }
+            }
+        };
+        let instance = instance.try_acquire_owned().map_err(|_| {
+            AppError::too_many_requests_with_message(1, "instance completion capacity is busy")
+        })?;
+        Ok(UploadPermit {
+            _global: global,
+            _instance: instance,
+        })
+    }
+
+    async fn acquire(&self, instance_id: Uuid) -> Result<UploadPermit, AppError> {
+        let instance = {
+            let mut instances = self
+                .instances
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            instances.retain(|_, semaphore| semaphore.strong_count() > 0);
+            if let Some(semaphore) = instances
+                .get(&instance_id)
+                .and_then(std::sync::Weak::upgrade)
+            {
                 semaphore
             } else {
-                let semaphore = std::sync::Arc::new(Semaphore::new(self.per_account_limit));
-                accounts.insert(account_id, std::sync::Arc::downgrade(&semaphore));
+                let semaphore = std::sync::Arc::new(Semaphore::new(self.per_instance_limit));
+                instances.insert(instance_id, std::sync::Arc::downgrade(&semaphore));
                 semaphore
             }
         };
         let wait = async {
-            // A request waiting for its own account must not occupy a slot
-            // that another account could use for actual I/O.
-            let account = account.acquire_owned().await;
+            // Waiting for one instance must leave other instances free to perform I/O.
+            let instance = instance.acquire_owned().await;
             let global = self.global.clone().acquire_owned().await;
-            match (global, account) {
-                (Ok(global), Ok(account)) => Ok(UploadPermit {
+            match (global, instance) {
+                (Ok(global), Ok(instance)) => Ok(UploadPermit {
                     _global: global,
-                    _account: account,
+                    _instance: instance,
                 }),
                 _ => Err(AppError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -111,6 +145,23 @@ impl UploadAdmission {
             .await
             .map_err(|_| AppError::too_many_requests_with_message(5, "upload capacity is busy"))?
     }
+}
+
+pub(crate) async fn run_completion<T: Send + 'static>(
+    permit: UploadPermit,
+    work: impl std::future::Future<Output = Result<T, AppError>> + Send + 'static,
+) -> Result<T, AppError> {
+    tokio::spawn(async move {
+        let _permit = permit;
+        work.await
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("upload completion task failed: {error}"),
+        )
+    })?
 }
 
 pub fn router(
@@ -220,7 +271,6 @@ pub fn router(
         Arc::clone(&state.administrator),
     )
     .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let trusted_proxies = state.config.trusted_proxies.clone();
     let product = sensitive
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .with_state(state);
@@ -231,10 +281,6 @@ pub fn router(
         .method_not_allowed_fallback(|| async {
             AppError::new(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed")
         })
-        .layer(axum::middleware::from_fn_with_state(
-            trusted_proxies,
-            xcss::client_ip::middleware,
-        ))
         .layer(axum::middleware::from_fn(log_request))
         .layer(axum::middleware::from_fn(
             xcss::server_cli::request_context_middleware,
@@ -243,7 +289,6 @@ pub fn router(
 
 async fn bootstrap(
     State(state): State<AppState>,
-    Extension(xcss::client_ip::ClientIp(source)): Extension<xcss::client_ip::ClientIp>,
     ContractJson(request): ContractJson<BootstrapRequest>,
 ) -> Result<Json<BootstrapResponse>, AppError> {
     let authorization_code = request.authorization_code.trim();
@@ -255,12 +300,8 @@ async fn bootstrap(
             "authorization_code, device_name and platform are required",
         ));
     }
-    state.login_admission.check_source(source)?;
+    let _work = state.login_admission.acquire_work()?;
     let authorization_hash = Sha256::digest(authorization_code.as_bytes()).to_vec();
-    state.login_admission.check_account(&format!(
-        "instance:{}",
-        URL_SAFE_NO_PAD.encode(&authorization_hash[..8])
-    ))?;
     let instance: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT id,account_id FROM devices \
          WHERE authorization_code_hash=? AND pairing_status='pending' AND token_hash IS NULL",
@@ -271,6 +312,7 @@ async fn bootstrap(
     let Some((device_id, account_id)) = instance else {
         return Err(AppError::unauthorized());
     };
+    state.login_admission.check_instance(device_id)?;
     let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut token_bytes = [0_u8; 32];
     SysRng
@@ -400,19 +442,6 @@ async fn create_upload(
         .bind(resource_id)
         .execute(&mut *transaction)
         .await?;
-        // Preserve the request manifest for diagnostics. No part bytes were
-        // received: the already-verified blob is the durable content proof.
-        for part in &request.parts {
-            sqlx::query(
-                "INSERT INTO upload_parts(upload_id,part_index,expected_size,expected_blake3) VALUES(?,?,?,?)",
-            )
-            .bind(receipt_id)
-            .bind(part.index as i32)
-            .bind(part.size as i64)
-            .bind(&part.blake3)
-            .execute(&mut *transaction)
-            .await?;
-        }
         audit::record_change(
             &mut transaction,
             auth.account_id,
@@ -584,7 +613,7 @@ async fn put_part(
         size: row.get::<i64, _>("expected_size") as u64,
         blake3: row.get("expected_blake3"),
     };
-    let _admission = state.upload_admission.acquire(auth.account_id).await?;
+    let _admission = state.upload_admission.acquire(auth.device_id).await?;
     state
         .storage
         .put_part(upload_id, &spec, body, state.config.max_part_bytes)
@@ -911,6 +940,38 @@ async fn log_request(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_completion_retains_its_instance_and_global_work_slots() {
+        let admission = UploadAdmission::new(2, 1);
+        let instance = Uuid::new_v4();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (complete, done) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(run_completion(
+            admission.try_acquire(instance).unwrap(),
+            async move {
+                started.send(()).unwrap();
+                done.await.unwrap();
+                Ok(())
+            },
+        ));
+        running.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(admission.try_acquire(instance).is_err());
+        let other = admission.try_acquire(Uuid::new_v4()).unwrap();
+        assert!(admission.try_acquire(Uuid::new_v4()).is_err());
+        complete.send(()).unwrap();
+        timeout(std::time::Duration::from_secs(1), async {
+            while admission.try_acquire(instance).is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(other);
+        assert_eq!(admission.global.available_permits(), 2);
+    }
+
     #[test]
     fn mobile_manifest_budget_accepts_4096_parts_and_rejects_overflow() {
         let mut request: CreateUploadRequest = serde_json::from_value(serde_json::json!({
@@ -951,12 +1012,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_account_does_not_reserve_another_accounts_upload_slot() {
+    async fn queued_instance_does_not_reserve_another_instances_upload_slot() {
         let admission = UploadAdmission::new(2, 1);
-        let account = Uuid::new_v4();
-        let first = admission.acquire(account).await.unwrap();
+        let instance = Uuid::new_v4();
+        let first = admission.acquire(instance).await.unwrap();
         {
-            let waiting = admission.acquire(account);
+            let waiting = admission.acquire(instance);
             tokio::pin!(waiting);
             assert!(
                 timeout(std::time::Duration::from_millis(20), &mut waiting)
@@ -969,7 +1030,7 @@ mod tests {
                 admission.acquire(Uuid::new_v4()),
             )
             .await
-            .expect("an idle account must be able to use the remaining slot")
+            .expect("an idle instance must be able to use the remaining slot")
             .unwrap();
             drop(other);
         }
@@ -978,12 +1039,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_a_global_wait_releases_the_account_admission() {
+    async fn cancelling_a_global_wait_releases_the_instance_admission() {
         let admission = UploadAdmission::new(1, 1);
         let first = admission.acquire(Uuid::new_v4()).await.unwrap();
-        let other_account = Uuid::new_v4();
+        let other_instance = Uuid::new_v4();
         {
-            let waiting = admission.acquire(other_account);
+            let waiting = admission.acquire(other_instance);
             tokio::pin!(waiting);
             assert!(
                 timeout(std::time::Duration::from_millis(20), &mut waiting)
@@ -994,10 +1055,10 @@ mod tests {
         drop(first);
         let other = timeout(
             std::time::Duration::from_secs(1),
-            admission.acquire(other_account),
+            admission.acquire(other_instance),
         )
         .await
-        .expect("cancelled requests must release account capacity")
+        .expect("cancelled requests must release instance capacity")
         .unwrap();
         drop(other);
         assert_eq!(admission.global.available_permits(), 1);
