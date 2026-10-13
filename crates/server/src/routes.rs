@@ -372,6 +372,47 @@ async fn create_upload(
         }
         let asset_id = upsert_asset(&mut transaction, &auth, &request).await?;
         let resource_id = upsert_resource(&mut transaction, asset_id, blob_id, &request).await?;
+        // Deduplication is a completed backup too. Record it in the same ordered
+        // receipt ledger as uploaded resources so an older in-flight upload
+        // cannot overwrite this version when it eventually completes.
+        let receipt_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO uploads(
+                 id,account_id,device_id,asset_id,source_resource_id,content_blake3,request,
+                 state,commit_state,commit_final_key,commit_account_path,commit_expected_size,
+                 commit_expected_blake3,commit_blob_id,commit_resource_id,commit_deduplicated,
+                 created_at,updated_at,completed_at)
+               VALUES(?,?,?,?,?,?,?,'complete','committed',?,?,?,?,?,?,1,
+                      datetime('now'),datetime('now'),datetime('now'))"#,
+        )
+        .bind(receipt_id)
+        .bind(auth.account_id)
+        .bind(auth.device_id)
+        .bind(asset_id)
+        .bind(&request.source_resource_id)
+        .bind(&request.content_blake3)
+        .bind(serde_json::to_value(&request)?)
+        .bind(&storage_path)
+        .bind(&policy.storage_path)
+        .bind(stored_size)
+        .bind(&request.content_blake3)
+        .bind(blob_id)
+        .bind(resource_id)
+        .execute(&mut *transaction)
+        .await?;
+        // Preserve the request manifest for diagnostics. No part bytes were
+        // received: the already-verified blob is the durable content proof.
+        for part in &request.parts {
+            sqlx::query(
+                "INSERT INTO upload_parts(upload_id,part_index,expected_size,expected_blake3) VALUES(?,?,?,?)",
+            )
+            .bind(receipt_id)
+            .bind(part.index as i32)
+            .bind(part.size as i64)
+            .bind(&part.blake3)
+            .execute(&mut *transaction)
+            .await?;
+        }
         audit::record_change(
             &mut transaction,
             auth.account_id,

@@ -326,26 +326,23 @@ pub async fn delete_asset_permanently(
     ContractPath(asset_id): ContractPath<Uuid>,
     ContractJson(_request): ContractJson<EmptyRequest>,
 ) -> Result<StatusCode, AppError> {
-    let mut transaction = state.pool.begin().await?;
-    let blob_ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT r.blob_id FROM resources r
-        JOIN assets a ON a.id = r.asset_id
-        WHERE a.id = ? AND a.account_id = ? AND a.deleted_at IS NOT NULL
-        "#,
+    let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let upload_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM uploads WHERE asset_id = ? AND account_id = ?")
+            .bind(asset_id)
+            .bind(auth.account_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+    let deleted = sqlx::query(
+        "DELETE FROM assets WHERE id = ? AND account_id = ? AND deleted_at IS NOT NULL",
     )
     .bind(asset_id)
     .bind(auth.account_id)
-    .fetch_all(&mut *transaction)
+    .execute(&mut *transaction)
     .await?;
-    if blob_ids.is_empty() {
+    if deleted.rows_affected() == 0 {
         return Err(AppError::not_found("trashed asset not found"));
     }
-    sqlx::query("DELETE FROM assets WHERE id = ? AND account_id = ? AND deleted_at IS NOT NULL")
-        .bind(asset_id)
-        .bind(auth.account_id)
-        .execute(&mut *transaction)
-        .await?;
     audit::record_change(
         &mut transaction,
         auth.account_id,
@@ -367,8 +364,15 @@ pub async fn delete_asset_permanently(
     // The asset deletion is already durable. Physical reclamation is a
     // separate, retryable close-out step; never return 500 after committing
     // the user-visible delete because that would invite an unsafe replay.
+    let mut parts_pending = false;
+    for upload_id in upload_ids {
+        if let Err(error) = state.storage.remove_orphan_upload_parts(upload_id) {
+            parts_pending = true;
+            tracing::warn!(%upload_id, ?error, "deleted upload parts await reconciliation");
+        }
+    }
     match reconcile_orphan_blobs(&state, Some(auth.account_id)).await {
-        Ok(report) if report.errors == 0 => Ok(StatusCode::NO_CONTENT),
+        Ok(report) if report.errors == 0 && !parts_pending => Ok(StatusCode::NO_CONTENT),
         Ok(report) => {
             tracing::warn!(
                 account_id = %auth.account_id,

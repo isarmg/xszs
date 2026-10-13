@@ -116,6 +116,8 @@ async fn validate_database_file_rows(
         unknown_uploads == 0,
         "an upload has unknown commit state; reconcile it before continuing"
     );
+    // A receipt proves its own retained blob. The resource may now reference a
+    // newer version, just as validate_committed permits when retrying a receipt.
     let broken_committed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM uploads u
          LEFT JOIN accounts a ON a.id = u.account_id
@@ -130,7 +132,7 @@ async fn validate_database_file_rows(
              b.storage_path <> u.commit_final_key OR b.stored_size <> u.commit_expected_size OR
              b.content_blake3 IS NULL OR b.content_blake3 <> u.commit_expected_blake3 OR
              b.storage_encoding <> 'plain-v1' OR
-             r.id IS NULL OR r.blob_id <> b.id OR r.asset_id <> u.asset_id OR
+             r.id IS NULL OR r.asset_id <> u.asset_id OR
              a.id IS NULL OR a.storage_path <> u.commit_account_path
          )",
     )
@@ -197,7 +199,7 @@ async fn validate_active_commits(
     let mut rows = sqlx::query_as::<
         _,
         (
-            String,
+            Uuid,
             String,
             Option<String>,
             Option<String>,
@@ -205,7 +207,7 @@ async fn validate_active_commits(
             Option<String>,
             Option<String>,
             String,
-            Option<String>,
+            Option<Uuid>,
         ),
     >(
         "SELECT u.id, u.commit_state, u.commit_staged_key, u.commit_final_key,
@@ -222,16 +224,14 @@ async fn validate_active_commits(
             row_count <= MAX_METADATA_ENTRIES,
             "diagnostic metadata row budget exceeded"
         );
-        let (id, state, staged, final_key, size, hash, commit_account, account, blob_id) = row;
-        let upload_id = Uuid::parse_str(&id).context("active upload ID is invalid")?;
+        let (upload_id, state, staged, final_key, size, hash, commit_account, account, blob_id) =
+            row;
         ensure!(
             commit_account.as_deref() == Some(account.as_str()),
             "upload commit account path conflicts with its account"
         );
         ensure!(
-            blob_id
-                .as_deref()
-                .is_some_and(|value| Uuid::parse_str(value).is_ok()),
+            blob_id.is_some(),
             "upload commit blob ID is missing or invalid"
         );
         let size = u64::try_from(size.context("upload commit size is missing")?)?;
@@ -316,7 +316,7 @@ async fn validate_upload_manifests(
 ) -> anyhow::Result<()> {
     let mut expected_parts = BTreeMap::new();
     let mut manifest_bytes = 0_usize;
-    let mut rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+    let mut rows = sqlx::query_as::<_, (Uuid, String, String, String, String, String)>(
         "SELECT u.id, u.request, u.source_resource_id, u.content_blake3,
                 a.source_asset_id, a.media_kind
          FROM uploads u JOIN assets a ON a.id = u.asset_id ORDER BY u.id",
@@ -331,7 +331,6 @@ async fn validate_upload_manifests(
         );
         let (upload_id, request, source_resource_id, content_blake3, source_asset_id, media_kind) =
             row;
-        ensure!(Uuid::parse_str(&upload_id).is_ok(), "upload ID is invalid");
         let request: CreateUploadRequest =
             serde_json::from_str(&request).context("an upload request is invalid")?;
         ensure!(
@@ -359,7 +358,7 @@ async fn validate_upload_manifests(
                 .checked_add(part.size)
                 .context("upload part size overflow")?;
             manifest_bytes = manifest_bytes
-                .checked_add(upload_id.len() + part.blake3.len())
+                .checked_add(36 + part.blake3.len())
                 .context("diagnostic manifest budget overflow")?;
             ensure!(
                 expected_parts.len() < MAX_METADATA_ENTRIES && manifest_bytes <= MAX_INDEX_BYTES,
@@ -367,10 +366,7 @@ async fn validate_upload_manifests(
             );
             ensure!(
                 expected_parts
-                    .insert(
-                        (upload_id.clone(), i64::from(part.index)),
-                        (part.size, part.blake3)
-                    )
+                    .insert((upload_id, i64::from(part.index)), (part.size, part.blake3))
                     .is_none(),
                 "an upload contains duplicate part indexes"
             );
@@ -383,7 +379,7 @@ async fn validate_upload_manifests(
 
     drop(rows);
     let mut durable_parts = BTreeSet::new();
-    let mut rows = sqlx::query_as::<_, (String, i64, i64, String, Option<i64>, Option<String>)>(
+    let mut rows = sqlx::query_as::<_, (Uuid, i64, i64, String, Option<i64>, Option<String>)>(
         "SELECT upload_id, part_index, expected_size, expected_blake3, received_size, received_at
          FROM upload_parts ORDER BY upload_id, part_index",
     )
@@ -397,7 +393,7 @@ async fn validate_upload_manifests(
         );
         let (upload_id, index, size, hash, received_size, received_at) = row;
         let expected = expected_parts
-            .remove(&(upload_id.clone(), index))
+            .remove(&(upload_id, index))
             .context("an upload part is absent from its persisted request")?;
         let size = u64::try_from(size)?;
         ensure!(

@@ -420,6 +420,42 @@ impl LocalStorage {
         Ok(self.files.remove_file(staged.as_path())?)
     }
 
+    pub(crate) fn upload_directories(&self) -> Result<Vec<Uuid>, AppError> {
+        Ok(self
+            .files
+            .list_entries_bounded(Path::new("uploads"), usize::MAX)?
+            .into_iter()
+            .filter_map(|(name, kind)| {
+                if kind != crate::rooted_fs::RootEntryKind::Directory {
+                    return None;
+                }
+                let name = name.to_str()?;
+                let id = Uuid::parse_str(name).ok()?;
+                (id.to_string() == name).then_some(id)
+            })
+            .collect())
+    }
+
+    // Only call after the upload's metadata has been removed. Keep commit.lock:
+    // unlinking that inode could give a concurrent completion a different lock.
+    pub(crate) fn remove_orphan_upload_parts(&self, upload_id: Uuid) -> Result<u64, AppError> {
+        let directory = self.upload_dir(upload_id);
+        let mut removed = 0;
+        for name in self.files.list_regular_files(&directory)? {
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.len() == 13
+                && name.ends_with(".part")
+                && name.as_bytes()[..8].iter().all(u8::is_ascii_digit)
+                && self.files.remove_file(&directory.join(name))?
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub(crate) fn cleanup_orphan_staging(
         &self,
         configured_path: &str,

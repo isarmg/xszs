@@ -33,6 +33,7 @@ pub(crate) struct ReconcileReport {
     pub recovered: u64,
     pub marked_unknown: u64,
     pub orphan_stages_removed: u64,
+    pub orphan_upload_parts_removed: u64,
     pub orphan_blobs_removed: u64,
     pub errors: u64,
 }
@@ -1067,6 +1068,27 @@ pub(crate) async fn reconcile_all(state: &AppState) -> Result<ReconcileReport, A
         .orphan_blobs_removed
         .saturating_add(blob_report.removed);
     report.errors = report.errors.saturating_add(blob_report.errors);
+
+    // Covers crashes after deleting asset metadata and writes that were already
+    // in flight when deletion reclaimed the upload's original parts.
+    let directories = state.storage.upload_directories()?;
+    let retained_uploads: HashSet<Uuid> = sqlx::query_scalar("SELECT id FROM uploads")
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .collect();
+    for upload_id in directories {
+        if retained_uploads.contains(&upload_id) {
+            continue;
+        }
+        match state.storage.remove_orphan_upload_parts(upload_id) {
+            Ok(removed) => report.orphan_upload_parts_removed += removed,
+            Err(error) => {
+                report.errors += 1;
+                tracing::warn!(%upload_id, ?error, "orphan upload parts will be retried");
+            }
+        }
+    }
 
     let accounts: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT id, storage_path FROM accounts ORDER BY id")

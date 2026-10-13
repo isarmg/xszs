@@ -2119,7 +2119,12 @@ async fn upload_commit_recovers_every_durable_crash_boundary_after_restart() {
             "quota-bearing blob must appear exactly with the proven metadata transaction"
         );
 
+        let config = state.config.clone();
         close_test_state(state, pool).await;
+        tokio::task::spawn_blocking(move || crate::doctor::run(&config))
+            .await
+            .unwrap()
+            .expect("durable crash boundaries must remain diagnosable");
         (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
         let commit_state: String =
             sqlx::query_scalar("SELECT commit_state FROM uploads WHERE id = ?")
@@ -2263,6 +2268,14 @@ async fn committed_history_survives_resource_updates_and_is_not_a_recovery_scan(
         .expect("historical receipt remains independently verifiable");
     assert_eq!(retried.resource_id, first.resource_id);
 
+    let config = state.config.clone();
+    close_test_state(state, pool).await;
+    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
+        .await
+        .unwrap()
+        .expect("valid historical receipts must pass doctor after replacement");
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+
     let first_object: String =
         sqlx::query_scalar("SELECT commit_final_key FROM uploads WHERE id = ?")
             .bind(first_upload)
@@ -2288,6 +2301,224 @@ async fn committed_history_survives_resource_updates_and_is_not_a_recovery_scan(
             .unwrap();
     assert_eq!(states, vec!["committed", "committed"]);
     close_test_state(state, pool).await;
+}
+
+#[tokio::test]
+async fn trashed_unfinished_upload_asset_can_be_deleted() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account_id, device_id) =
+        seed_account(&pool, "blobs/unfinished-delete", "unfinished-delete").await;
+    let upload_id = seed_received_upload(
+        &state,
+        account_id,
+        device_id,
+        b"unfinished",
+        "unfinished-delete",
+    )
+    .await;
+    let asset_id: Uuid = sqlx::query_scalar("SELECT asset_id FROM uploads WHERE id = ?")
+        .bind(upload_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE assets SET deleted_at = datetime('now') WHERE id = ?")
+        .bind(asset_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = AuthContext {
+        account_id,
+        device_id,
+        actor_kind: "device".into(),
+        actor_id: device_id,
+        credential_hash: vec![],
+    };
+    let response = library::delete_asset_permanently(
+        axum::extract::State(state.clone()),
+        axum::extract::Extension(auth),
+        xcss::server_cli::ContractPath(asset_id),
+        xcss::server_cli::ContractJson(xszs_protocol::EmptyRequest {}),
+    )
+    .await
+    .expect("a trashed asset does not need a completed resource to be deleted");
+    assert_eq!(response, StatusCode::NO_CONTENT);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assets WHERE id = ?")
+            .bind(asset_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM uploads WHERE id = ?")
+            .bind(upload_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    close_test_state(state, pool).await;
+}
+
+#[tokio::test]
+async fn deleting_completed_asset_reclaims_orphan_upload_parts() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account_id, device_id) = seed_account(&pool, "blobs/deleted-parts", "deleted-parts").await;
+    let upload_id = seed_received_upload(
+        &state,
+        account_id,
+        device_id,
+        b"delete media",
+        "deleted-parts",
+    )
+    .await;
+    let completed = upload_commit::complete(&state, upload_id, account_id)
+        .await
+        .unwrap();
+    let retained = seed_received_upload(
+        &state,
+        account_id,
+        device_id,
+        b"retain media",
+        "retained-parts",
+    )
+    .await;
+    sqlx::query("UPDATE assets SET deleted_at = datetime('now') WHERE id = ?")
+        .bind(completed.asset_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = AuthContext {
+        account_id,
+        device_id,
+        actor_kind: "device".into(),
+        actor_id: device_id,
+        credential_hash: vec![],
+    };
+    library::delete_asset_permanently(
+        axum::extract::State(state.clone()),
+        axum::extract::Extension(auth),
+        xcss::server_cli::ContractPath(completed.asset_id),
+        xcss::server_cli::ContractJson(xszs_protocol::EmptyRequest {}),
+    )
+    .await
+    .unwrap();
+    let part_path = workspace
+        .data()
+        .join(format!("uploads/{upload_id}/00000000.part"));
+    assert!(
+        !part_path.exists(),
+        "asset deletion must not leave untracked upload bytes"
+    );
+    assert!(
+        workspace
+            .data()
+            .join(format!("uploads/{retained}/00000000.part"))
+            .exists()
+    );
+    // Simulate a crash after metadata deletion, before local part cleanup.
+    sqlx::query("DELETE FROM assets WHERE id = (SELECT asset_id FROM uploads WHERE id = ?)")
+        .bind(retained)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = upload_commit::reconcile_all(&state).await.unwrap();
+    assert_eq!(report.orphan_upload_parts_removed, 1);
+    assert!(
+        !workspace
+            .data()
+            .join(format!("uploads/{retained}/00000000.part"))
+            .exists()
+    );
+    assert!(
+        workspace
+            .data()
+            .join(format!("uploads/{upload_id}/commit.lock"))
+            .exists(),
+        "cleanup must preserve the existing commit lock inode"
+    );
+    let config = state.config.clone();
+    close_test_state(state, pool).await;
+    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
+        .await
+        .unwrap()
+        .expect("the remaining database and files must pass doctor");
+}
+
+#[tokio::test]
+async fn late_older_upload_cannot_replace_a_newer_deduplicated_resource() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account_id, device_id) = seed_account(&pool, "blobs/ordered-dedup", "ordered-dedup").await;
+    let bearer = "ordered-dedup-token";
+    sqlx::query("UPDATE devices SET token_hash = ? WHERE id = ?")
+        .bind(sha2::Sha256::digest(bearer.as_bytes()).to_vec())
+        .bind(device_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The newest content already exists under a different source resource.
+    let existing =
+        seed_received_upload(&state, account_id, device_id, b"newer", "dedup-source").await;
+    upload_commit::complete(&state, existing, account_id)
+        .await
+        .unwrap();
+    let older = seed_received_upload(&state, account_id, device_id, b"older", "dedup-target").await;
+    let old_request: Value = sqlx::query_scalar("SELECT request FROM uploads WHERE id = ?")
+        .bind(older)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut newest_request: Value = sqlx::query_scalar("SELECT request FROM uploads WHERE id = ?")
+        .bind(existing)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    newest_request["source_asset_id"] = old_request["source_asset_id"].clone();
+    newest_request["source_resource_id"] = old_request["source_resource_id"].clone();
+    let app = test_router(state.clone()).await;
+    let response = json_body(
+        send(
+            &app,
+            json_request(
+                Method::POST,
+                "/v1/uploads",
+                newest_request,
+                Some(bearer),
+                None,
+            ),
+            StatusCode::OK,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(response["disposition"], "complete");
+    let rejected = upload_commit::complete(&state, older, account_id)
+        .await
+        .expect_err("the newer deduplicated backup must supersede the old upload");
+    assert_eq!(
+        json_body(rejected.into_response()).await["code"],
+        "upload_superseded"
+    );
+    let resource_id = Uuid::parse_str(response["resource_id"].as_str().unwrap()).unwrap();
+    let visible_hash: String = sqlx::query_scalar(
+        "SELECT b.content_blake3 FROM resources r JOIN blobs b ON b.id = r.blob_id WHERE r.id = ?",
+    )
+    .bind(resource_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(visible_hash, blake3::hash(b"newer").to_hex().to_string());
+    drop(app);
+    let config = state.config.clone();
+    close_test_state(state, pool).await;
+    tokio::task::spawn_blocking(move || crate::doctor::run(&config))
+        .await
+        .unwrap()
+        .expect("deduplicated receipts must satisfy offline consistency checks");
 }
 
 #[tokio::test]
