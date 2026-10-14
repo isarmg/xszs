@@ -1,6 +1,6 @@
 # 工程组织与责任边界
 
-此页说明当前源码的模块职责。运行步骤见[文档入口](README.md)，发行身份由程序、源码 SHA 与 manifest 对应。
+此页说明当前源码的模块职责。运行步骤见[文档入口](README.md)，发行身份由程序、源码修订与 SHA-256 校验清单对应。
 
 ## 目录约定
 
@@ -12,7 +12,7 @@
 
 管理 Web 中 `OverviewView.tsx` 维护有界实例页及服务器全局统计，`UserDetailsView.tsx` 维护单实例编辑/授权，`LogsView.tsx` 维护日期、实例作用域、日志游标与请求预算；两种分页复用 `PageNavigation.tsx`。`main.tsx` 只组合导航与按 ID 的详情读取，不包含分页实现。
 
-领域按 config / lifecycle / administration / media / upload / storage 划分。`routes.rs` 与 `admin.rs` 执行入口授权，`library.rs` 管理媒体语义，`upload_commit.rs` 管理持久提交与恢复，`storage.rs` / `rooted_fs.rs` 管理实际文件边界，`database.rs` 管理当前 Schema。 `main.rs` 仅解析 ROOT 并进入运行；独立签名 setup 通过库的 `offline.rs` 初始化、检查和重置状态；入口不重新实现 xcss 机制。
+领域按 config / lifecycle / administration / media / upload / storage 划分。`routes.rs` 与 `admin.rs` 执行入口授权，`library.rs` 管理媒体语义，`upload_commit.rs` 管理持久提交与恢复，`storage.rs` / `rooted_fs.rs` 管理实际文件边界，`database.rs` 管理当前 Schema。 `main.rs` 仅解析 ROOT 并进入运行；`config_definition.rs`、`installation_definition.rs` 和构建导出的契约材料定义当前配置、DDL、凭据与资源；初始化、只读维护和密码重置由独立 XSSI 辅助程序实施。
 
 软件身份来自 Cargo，发行配置须与其一致；业务协议来自 `crates/protocol/`，当前 DDL 来自 `schema/`。当前 Schema revision/指纹为 1、`0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`，此次保持不变。Rust 与 Web xcss 使用已发布的完整 Git revision、精确版本或具备完整性摘要的发行包，不依赖同级源码作为正式构建输入。候选 xcss 联调只能作为明确记录的临时覆盖，不能伪装成已发布依赖。
 
@@ -20,7 +20,7 @@
 
 正式目标保持 `x86_64-unknown-linux-gnu`；其他目标的 Server 构建明确拒绝。业务代码及必要管理 Web 嵌入单个可执行程序，TLS 入口、权限和环境依赖见部署文档。
 
-公共配置、CLI、日志、认证、运行生命周期、SQLite 和安全状态文件来自 xcss；产品维护实例归属、权限语义、业务持久条件及资源上限。`init` 显式创建空的私有状态；`run` 严格验证现有状态；`config validate` 使用只读验证快照；运行和独占维护使用共同目录锁。未满足当前契约时不得重建或猜测修复。
+公共配置、CLI、日志、认证、运行生命周期、SQLite 和安全状态文件来自 xcss；产品维护实例归属、权限语义、业务持久条件及资源上限。业务程序仅接受显式绝对路径 `--root ROOT`，严格验证现有状态并使用实际运行锁；XSSI 独立安装和维护入口使用 ROOT 内的工具操作锁，并在离线写入前通过系统服务管理确认所有写入者退出。两类锁承担不同职责。未满足当前契约时不得重建或猜测修复。
 
 ## 验证与支持限制
 

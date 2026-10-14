@@ -1,6 +1,6 @@
 # xszs 完整功能与取舍清单
 
-本文描述 xszs `1.0.3` 的服务端、React 管理 Web、协议、存储和交付边界。
+本文描述 xszs `1.0.0` 的服务端、React 管理 Web、协议、存储和交付边界。
 服务端源码、`schema/generated/current_schema.sql` 和发行 manifest 是实现依据。
 移动队列、FFI、Android/iOS 权限与交互由 [Client 文档](https://github.com/isarmg/xszc/blob/main/docs/README.md)维护。
 
@@ -44,12 +44,12 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 |---|---|---|---|---|---|---|
 | MED-P-001 | Android/iOS 把授权范围内的照片、视频和设备生成缩略图备份到自托管 Server | Client 仓库、`crates/server` | 核心 | 高 | 项目不再是完整移动媒体备份系统 | 两平台至少一条原始媒体+缩略图端到端 |
 | MED-P-002 | Server 唯一支持 `x86_64-unknown-linux-gnu`，正式主机唯一为 Linux AMD64 | `xcss::server_target`、server `build.rs`、release/systemd/scripts | 保障 | 高 | 会产生未经验证的 Server 平台制品 | 非目标编译、错误 ELF、错误 uname、systemd architecture |
-| MED-P-004 | Server 软件为 `1.0.3`、数据库合同为 `1.0.0`/revision 1；Client 发行与移动状态另有独立身份 | metadata、Client mobile epoch、release identity | 保障 | 高 | 混用版本维度会误拒绝兼容状态或误收旧状态 | 各边界按自己的 product/version/revision 精确拒绝 |
+| MED-P-004 | Server 软件为 `1.0.0`、数据库合同为 `v1`/revision 1；Client 发行与移动状态另有独立身份 | metadata、Client mobile epoch、release identity | 保障 | 高 | 混用版本维度会误拒绝兼容状态或误收旧状态 | 各边界按自己的 product/version/revision 精确拒绝 |
 | MED-P-005 | 数据库只接受当前精确结构 | Server CLI、Client open path | 保障 | 高 | 在线转换会把未知状态带入服务进程 | CLI 清单；Schema mismatch 只读失败 |
 | MED-P-006 | Server 配置位于 `config/`、部署资产位于 `deploy/`；移动客户端只存在于独立 Client 仓库 | 仓库目录 | 开发运维 | 低 | 跨仓库路径和构建命令易被混用 | README、CI 和脚本只引用实际存在的目录 |
 | MED-P-007 | React/Vite 管理 Web 位于 `web/`，随 Server 构建和交付 | 目录结构、workspace scripts | 开发运维 | 低 | 客户端代码位置不一致，维护人员难以识别边界 | README、CI、构建脚本使用统一路径 |
 | MED-P-008 | 原始媒体在 Server 使用 `plain-v1` 明文字节，传输机密性依赖 HTTPS | `StorageEncoding::PlainV1`、Client `crates/crypto` | 核心 | 高 | 改成端到端密文会重写缩略图、恢复、去重和密钥生命周期 | byte-for-byte round trip；HTTP 明文直连不得公网暴露 |
-| MED-P-009 | Server Rust 和一个 @xcss/web 包固定 xcss 1.0.7 的完整 Git revision、Release URL 与 lock integrity，无相邻工作区来源 | Cargo、一个 `@xcss/web` 依赖、manifest/lock | 保障 | 高 | 平台行为随未固定依赖漂移 | locked 独立构建、xcss revision test 与 Web 门禁 |
+| MED-P-009 | Server Rust 和一个 @xcss/web 包固定 xcss 1.0.0 的完整 Git revision、Release URL 与 lock integrity，无相邻工作区来源 | Cargo、一个 `@xcss/web` 依赖、manifest/lock | 保障 | 高 | 平台行为随未固定依赖漂移 | locked 独立构建、xcss revision test 与 Web 门禁 |
 
 ## 3. 身份、认证与请求边界
 
@@ -61,7 +61,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-A-004 | 管理员密码只接受 xcss 当前 Argon2id 策略 | Admin Core、Admin Auth | 保障 | 高 | 产品不能另设 hash 分支 | PHC 参数与口令策略负例 |
 | MED-A-005 | 三个浏览器认证入口精确为 `/api/v1/auth/login`、`/api/v1/auth/session`、`/api/v1/auth/logout` | xcss path constants、`routes.rs` | 保障 | 中 | 路径漂移破坏共享客户端；别名扩大攻击面 | method/path 矩阵，合同外路径拒绝 |
 | MED-A-006 | 登录 body 精确 username/password，Session 使用平台五字段合同 | xcss Axum Adapter、Contracts | 保障 | 中 | 产品不能重解释认证结果 | strict DTO、401/403、ErrorEnvelope |
-| MED-A-007 | 管理员登录不识别访客 IP；保留有界请求体读取与 Argon2 并发等待上限 | xcss Admin Core | 保障 | 高 | 密码验证和请求体不得耗尽服务全局容量 | 共享 Adapter 套件 |
+| MED-A-007 | 管理员登录按实际数据库限制每 60 秒 60 次尝试；不识别访客 IP，保留有界请求体读取与 Argon2 并发等待上限 | xcss Admin Core | 保障 | 高 | 密码验证和请求体不得耗尽服务全局容量 | 共享 Adapter 套件 |
 | MED-A-008 | 未知账户执行当前 dummy hash | xcss Admin Core | 保障 | 中 | 避免账户存在性时序差异 | dummy verification 测试 |
 | MED-A-009 | 管理 Session/CSRF token 只以摘要存储 | xcss Admin SQLite | 保障 | 高 | 产品不得另存明文 token | `_common_admin_sessions` 当前 DDL |
 | MED-A-010 | 固定每管理员 32、全局 1024 Session，空闲 30 分钟、绝对 12 小时 | xcss Admin Policy | 保障 | 高 | 无产品 TTL 配置或分叉限额 | 过期、上限、last_seen 写入节流 |
@@ -150,20 +150,20 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
-| MED-R-001 | Server 软件为 1.0.3，数据库 Schema identity 为 xszs 1.0.0、revision 1、SHA `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`；管理员和平台 DDL 由 xcss 组合 | `database.rs`、`schema/generated/current_schema.sql` | 保障 | 高 | 错库或 DDL drift 必须拒绝 | metadata、现场 fingerprint、当前身份精确校验 |
+| MED-R-001 | Server 软件为 1.0.0，数据库 Schema identity 为 xszs v1、revision 1、SHA `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`；管理员和平台 DDL 由 xcss 组合 | `database.rs`、`schema/generated/current_schema.sql` | 保障 | 高 | 错库或 DDL drift 必须拒绝 | metadata、现场 fingerprint、当前身份精确校验 |
 | MED-R-003 | Server 持完整运行锁后仅复制一次 main/WAL/journal 私有 generation，源未变化确认后在同一快照上完成 schema、integrity、FK、管理员和业务授权检查 | `crates/server/src/database.rs` | 保障 | 高 | 启动验证可能读取跨时刻混合状态或写源库 | WAL、并发变化、symlink、cleanup |
-| MED-R-004 | Server open 使用 WAL、foreign keys、busy timeout，离线 setup 做 integrity/FK 校验 | `database.rs`、`offline.rs` | 保障 | 高 | 并发/损坏行为不可预测 | PRAGMA、corruption、FK violation |
+| MED-R-004 | Server open 使用 WAL、foreign keys、busy timeout，离线 setup 做 integrity/FK 校验 | `database.rs`、生成材料和 XSSI 独立辅助程序 | 保障 | 高 | 并发/损坏行为不可预测 | PRAGMA、corruption、FK violation |
 | MED-R-005 | runtime lock 同时绑定数据库与 DATA_DIR，防止两个 Server 管同一状态 | `runtime_lock.rs` | 保障 | 高 | 双实例可同时提交、清理和改账户路径 | 同 DB/不同 data、同 data/不同 DB、symlink/hardlink |
-| MED-R-006 | 独立签名 setup 只读核对现行 Schema、完整性、管理员及实例密文；HTTP 运行期间提交和读取验证实际内容 | `offline.rs`、`storage.rs` | 开发运维 | 高 | 损坏事实可能遗漏 | 源字节/mtime不变、wrong schema、wrong key |
+| MED-R-006 | XSSI 独立辅助程序 只读核对现行 Schema、完整性、管理员及实例密文；HTTP 运行期间提交和读取验证实际内容 | 生成契约、XSSI 辅助程序、`storage.rs` | 开发运维 | 高 | 损坏事实可能遗漏 | 源字节/mtime不变、wrong schema、wrong key |
 | MED-R-007 | `/healthz` 为最小存活检查；`/readyz` 检查 DB/storage；详细诊断要求管理员 | xcss Runtime | 开发运维 | 中 | 负载均衡需区分可响应与可写服务 | 匿名无内部信息、诊断认证、任务监督 |
 | MED-R-008 | Prometheus 文本只暴露聚合 user/device/resource/bytes/upload 指标 | `metrics.rs` | 开发运维 | 中 | 容量不可监控；若加 labels 不慎会泄漏用户名/路径 | content type、token、无高基数/Secret |
-| MED-R-009 | 同次构建导出 source revision、target、现行 Schema 与 Web 清单，XSSI 签名包 metadata | `build.rs`、XSSI | 保障 | 高 | 不同代制品可混用 | 签名与身份一致、精确pin |
-| MED-R-010 | XSSI 签名清单约束文件、mode、size、SHA，拒绝额外/缺失/链接 | XSSI `package.py` | 保障 | 高 | 安装树内容无法证明 | missing/extra/tamper/symlink/hardlink/mode |
-| MED-R-011 | 正式 binary 只接受 `--root ROOT` 运行，包验证在执行任何候选 ELF 前完成 | `main.rs`、XSSI | 保障 | 中 | 下载校验与运行职责不清 | 移除命令拒绝、只读check、验签先于setup |
-| MED-R-012 | product build 与独立 setup 限 Linux AMD64；包实际 ELF 与签名 metadata 一致 | target gate、XSSI | 开发运维 | 中 | 文件名与真实运行平台不一致 | wrong target、ELF检查 |
-| MED-R-013 | 发行包包含 binary、配置样例、XSSI 统一模板生成的 systemd、脚本、Web 和必要文档 | build script | 开发运维 | 高 | 操作者拿到不完整或跨代部署单元 | expected exact layout、签名元数据与逐文件完整性校验 |
+| MED-R-009 | 同次构建导出 source revision、target、现行 Schema 与 Web 清单，XSSI 包身份与 SHA-256 校验元数据 | `build.rs`、XSSI | 保障 | 高 | 不同代制品可混用 | 校验摘要与身份一致、精确pin |
+| MED-R-010 | XSSI SHA-256 校验清单约束文件、mode、size、SHA，拒绝额外/缺失/链接 | XSSI `package.py` | 保障 | 高 | 安装树内容无法证明 | missing/extra/tamper/symlink/hardlink/mode |
+| MED-R-011 | 正式 binary 只接受 `--root ROOT` 运行，包验证在执行任何候选 ELF 前完成 | `main.rs`、XSSI | 保障 | 中 | 下载校验与运行职责不清 | 移除命令拒绝、只读check、摘要核验先于辅助程序执行 |
+| MED-R-012 | product build 与独立 setup 限 Linux AMD64；包实际 ELF 与校验 metadata 一致 | target gate、XSSI | 开发运维 | 中 | 文件名与真实运行平台不一致 | wrong target、ELF检查 |
+| MED-R-013 | 发行包包含 binary、配置样例、XSSI 统一模板生成的 systemd、脚本、Web 和必要文档 | build script | 开发运维 | 高 | 操作者拿到不完整或跨代部署单元 | expected exact layout、校验元数据与逐文件完整性校验 |
 | MED-R-014 | XSSI 统一 systemd 模板，以 isarmg-xszs 运行，配置/logs/run都由ROOT派生，业务状态允许显式外置 | XSSI templates/install | 保障 | 高 | 错账户或权限扩大主机范围 | unit escaping、service identity、writable_paths |
-| MED-R-015 | 安装脚本初始化；升级先下载验签，再停服、XSSC备份/明确迁移/替换、启动和就绪检查，失败恢复 | XSSI、XSSC | 保障 | 高 | 误初始化或换密钥破坏实例 | 初装、并发、升级/回滚、密钥与账号保持 |
+| MED-R-015 | 安装脚本初始化；升级先下载并核验 SHA-256，再停服、XSSC备份/当前结构只读检查/替换、启动和就绪检查，失败恢复 | XSSI、XSSC | 保障 | 高 | 误初始化或换密钥破坏实例 | 初装、并发、升级/回滚、密钥与账号保持 |
 | MED-R-016 | 本仓库 CI 覆盖 Rust、管理 Web、协议与 Server 发行；移动端 CI 属于 Client 仓库 | `.github/workflows`、`scripts/` | 开发运维 | 高 | 任一平台可在 wire/FFI 漂移时独立发布 | clean checkout jobs、平台矩阵、lock mode |
 | MED-R-017 | Rust 固定 1.99.0；Web Node/toolchain 与 Cargo/npm locks 均固定 | toolchain/version/lock files | 开发运维 | 中 | 解析随时间变化，制品难复现 | `--locked`、`npm ci`、version output |
 | MED-R-018 | 中文 README、学习、流程、功能取舍和运维文档是发行/维护闭包 | `README.md`、`docs/` | 开发运维 | 低 | 跨五种语言/平台的知识只能口头传递 | 链接、命令、代码锚点和 schema hash 抽查 |

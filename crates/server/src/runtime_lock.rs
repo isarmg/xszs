@@ -275,7 +275,6 @@ fn lock_location(resource: &Path, label: &str, kind: ResourceKind) -> anyhow::Re
 pub(crate) fn sqlite_database_path(database_url: &str) -> anyhow::Result<PathBuf> {
     let value = database_url
         .strip_prefix("sqlite://")
-        .or_else(|| database_url.strip_prefix("sqlite:"))
         .context("DATABASE_URL must use the sqlite scheme")?;
     ensure!(
         !value.is_empty() && value != ":memory:",

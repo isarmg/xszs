@@ -1,11 +1,13 @@
-# Configuration
+# 配置与生效
 
-`xszs --root ROOT` reads the private JSON file `ROOT/config/config.json`. The root defaults to `/opt/isarmg/xszs` and must be an absolute, normalized directory. Configuration parsing rejects duplicate and unknown fields.
+`xszs --root ROOT` 读取 `ROOT/config/config.json`。ROOT 只能显式传入绝对路径，安装工具的默认位置为 `/opt/isarmg/xszs`。JSON 拒绝重复键、未知字段及不符合当前契约的类型与业务值。
 
-The supplied [example](../config/xszs.json.example) contains the current product options. `data_dir` defaults to `ROOT/state`; setting it explicitly selects external persistent instance data. `ROOT/logs` and `ROOT/run` remain inside the installation root. State cannot overlap the package, configuration, log, runtime or maintenance paths.
+[配置样例](../config/xszs.json.example)及 `crates/server/src/config_definition.rs` 是产品字段、默认值和校验的来源。`data_dir` 默认 ROOT/state；明确设置物理绝对路径后，私有数据库和配套密钥可以整体外置。ROOT/logs、ROOT/run 仍在安装根内；状态不得与程序、配置、日志、运行或维护目录重叠。
 
-`bind` selects the HTTP listener, `log_level` selects structured logging, and `development` permits loopback HTTP during local development. Production administrator sessions require HTTPS at the browser origin. Only unbound development builds can use directory Web assets.
+配置由管理员控制：直属目录 root 所有、0700 或 0750，文件 root 所有、0600 或 0640、单硬链接且与父目录同组；不得有额外访问或默认 ACL。服务账号按实际组权限只读。运行程序不会为了加载文件而改属主、权限或创建文件；管理员修改后需重启服务。
 
-Product-prefixed environment settings retain their documented precedence over JSON. The public command line selects only `--root`; offline configuration validation reports effective paths and bind address without credentials. The application does not accept proxy or client-IP settings.
+`bind` 选择监听地址，`log_level` 选择结构化日志等级。`development` 用于显式回环 HTTP 开发模式；生产管理会话要求浏览器 HTTPS 来源。只有未绑定发行源码的 debug 构建允许使用开发目录 Web 资源和开发用户所有的私有配置。
 
-`storage_dir` defaults to `data_dir/media` and may select an external media directory. Upload parts use the configured global and verified-instance concurrency, while completion work is limited to two global tasks and one task per persisted device. File quotas and content verification apply independently.
+产品前缀环境变量的明确映射见 `crates/server/src/config.rs`，优先于 JSON；命令行只选择 ROOT。独立 XSSI 只读维护核对当前材料和实际有效配置，诊断不输出凭据。业务程序没有代理或访客 IP 配置。
+
+`storage_dir` 默认 `data_dir/media`，可明确设置外置媒体目录。上传分块按有界全局槽和真实实例限制并发；完成处理最多两个全局任务、每个已持久化设备一个任务，文件配额和内容核验独立执行。

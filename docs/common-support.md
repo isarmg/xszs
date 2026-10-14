@@ -9,13 +9,13 @@
 
 ## 固定输入
 
-Cargo manifest 指定官方 Git URL、完整 revision 和精确 `=1.0.7`，Cargo.lock 固定依赖解析结果。
+Cargo manifest 指定官方 Git URL、完整 revision 和精确 `=1.0.0`，Cargo.lock 固定依赖解析结果。
 Web 的 package.json 依赖条目如下，合并到项目自身的 dependencies 中：
 
 ```json
 {
   "dependencies": {
-    "@xcss/web": "https://github.com/isarmg/xcss/releases/download/v1.0.7/xcss-web-1.0.7.tgz"
+    "@xcss/web": "https://github.com/isarmg/xcss/releases/download/v1.0.0/xcss-web-1.0.0.tgz"
   }
 }
 ```
@@ -40,4 +40,4 @@ cargo tree --locked -e normal
 同时更新源码 revision、manifest、锁文件、调用代码和测试；Web 还需核对 tarball URL 与真实 SHA-512 integrity，并重新生成内嵌资源。
 遇到找不到模块或完整性错误，先对照同一版本的来源和锁文件，再按项目开发文档构建验证。最终源码、目标平台和实际发行物分别记录验收结果。
 
-Rust 输入固定为 xcss 1.0.13 / `b9b5858088510d0bf6832044353c92d09ee123fe`；Web 输入为 `https://github.com/isarmg/xcss/releases/download/v1.0.13/xcss-web-1.0.13.tgz`，锁文件 SHA512 integrity 固定为 `sha512-nqoi5uOqmrjH/2j3PXoi1bGVPucr+Rm1HzWiXjr2bhzJ6AgnlD1Y6AywKvIAZnOGIVg5RFi36aLc2vc5Srri9g==`。正式发行不使用本地路径补丁。
+Rust 输入固定为 xcss 1.0.0 / `b34b3861e15edd2b1348e7d03b9c9a93e97d6521`；Web 输入为 `https://github.com/isarmg/xcss/releases/download/v1.0.0/xcss-web-1.0.0.tgz`，锁文件 SHA512 integrity 固定为 `sha512-QR/zmdzyQkLnFzTTp+EHYnOL9XEe5N95XVUasnDlKqdNWw/nVoY4evq083QTxMED/ElRRYeegEItnTxCUcb7TQ==`。正式发行不使用本地路径补丁。

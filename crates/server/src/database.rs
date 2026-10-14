@@ -1,25 +1,32 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, ensure};
 use sqlx::{
-    Connection, SqliteConnection, SqlitePool,
+    SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use xcss::schema_identity::SchemaIdentity;
 
+#[cfg(test)]
+use sqlx::Connection;
+#[cfg(test)]
+use std::fs::{File, OpenOptions};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
+#[cfg(all(test, unix))]
+use std::os::unix::fs::OpenOptionsExt;
 
-const APPLICATION: &str = "xszs";
+use crate::database_definition::{APPLICATION, SCHEMA_APPLICATION_VERSION};
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const CURRENT_SCHEMA: &str = include_str!("../../../schema/generated/current_schema.sql");
-pub(crate) const CURRENT_SCHEMA_REVISION: i64 = 1;
-pub(crate) const CURRENT_SCHEMA_SHA256: &str =
-    "0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d";
+pub(crate) use crate::database_definition::{
+    SCHEMA_REVISION as CURRENT_SCHEMA_REVISION, SCHEMA_SHA256 as CURRENT_SCHEMA_SHA256,
+};
 
 #[cfg(test)]
 pub(crate) async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
@@ -67,6 +74,7 @@ pub(crate) async fn connect_validated_location(database_url: &str) -> anyhow::Re
     Ok(pool)
 }
 
+#[cfg(test)]
 pub(crate) fn initialize(database_url: &str) -> anyhow::Result<()> {
     let path = database_path(database_url)?;
     require_real_parent(&path)?;
@@ -147,7 +155,6 @@ fn validate_current_snapshot(snapshot: xcss::sqlite::ValidationSnapshot) -> anyh
 pub(crate) fn database_path(database_url: &str) -> anyhow::Result<PathBuf> {
     let value = database_url
         .strip_prefix("sqlite://")
-        .or_else(|| database_url.strip_prefix("sqlite:"))
         .context("DATABASE_URL must use the sqlite scheme")?;
     ensure!(!value.is_empty(), "SQLite database path must not be empty");
     ensure!(value != ":memory:", "in-memory SQLite is not supported");
@@ -170,6 +177,7 @@ pub(crate) fn database_path(database_url: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(test)]
 fn initialize_current_database(path: &Path) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -194,7 +202,7 @@ fn initialize_current_database(path: &Path) -> anyhow::Result<()> {
             let actual = xcss::sqlite::schema_fingerprint(&mut *transaction).await?;
             ensure!(actual == CURRENT_SCHEMA_SHA256, "compiled current schema fingerprint mismatch");
             sqlx::query("INSERT INTO product_metadata(singleton,application,application_version,schema_revision,schema_sha256) VALUES(1,?,?,?,?)")
-                .bind(APPLICATION).bind("1.0.0").bind(CURRENT_SCHEMA_REVISION).bind(CURRENT_SCHEMA_SHA256)
+                .bind(APPLICATION).bind(SCHEMA_APPLICATION_VERSION).bind(CURRENT_SCHEMA_REVISION).bind(CURRENT_SCHEMA_SHA256)
                 .execute(&mut *transaction).await?;
             validate_current_connection(&mut transaction).await?;
             transaction.commit().await?;
@@ -214,6 +222,7 @@ fn initialize_current_database(path: &Path) -> anyhow::Result<()> {
     result
 }
 
+#[cfg(test)]
 fn require_absent_sidecars(path: &Path) -> anyhow::Result<()> {
     for candidate in sqlite_generation_paths(path).into_iter().skip(1) {
         match fs::symlink_metadata(&candidate) {
@@ -227,6 +236,7 @@ fn require_absent_sidecars(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 async fn validate_current_connection(connection: &mut SqliteConnection) -> anyhow::Result<()> {
     xcss::sqlite::require_current_schema(connection, &current_schema_identity()?)
         .await
@@ -237,7 +247,7 @@ async fn validate_current_connection(connection: &mut SqliteConnection) -> anyho
 pub(crate) fn current_schema_identity() -> anyhow::Result<SchemaIdentity> {
     SchemaIdentity::new(
         APPLICATION,
-        "1.0.0",
+        SCHEMA_APPLICATION_VERSION,
         u64::try_from(CURRENT_SCHEMA_REVISION).context("schema revision must not be negative")?,
         CURRENT_SCHEMA_SHA256,
     )
@@ -283,6 +293,7 @@ fn require_real_parent(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn sqlite_generation_paths(path: &Path) -> [PathBuf; 4] {
     [
         path.to_path_buf(),
@@ -292,12 +303,14 @@ fn sqlite_generation_paths(path: &Path) -> [PathBuf; 4] {
     ]
 }
 
+#[cfg(test)]
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
 }
 
+#[cfg(test)]
 fn sync_parent(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
@@ -366,7 +379,7 @@ mod tests {
             metadata,
             (
                 APPLICATION.to_string(),
-                "1.0.0".to_string(),
+                SCHEMA_APPLICATION_VERSION.to_string(),
                 CURRENT_SCHEMA_REVISION,
                 CURRENT_SCHEMA_SHA256.to_string()
             )
@@ -473,7 +486,7 @@ mod tests {
                  ) VALUES (1, ?, ?, ?, ?)",
         )
         .bind(APPLICATION)
-        .bind("1.0.0")
+        .bind(SCHEMA_APPLICATION_VERSION)
         .bind(CURRENT_SCHEMA_REVISION)
         .bind(fingerprint)
         .execute(&mut connection)
@@ -530,7 +543,7 @@ mod tests {
                  );
                  INSERT INTO product_metadata VALUES
                      (1, '{APPLICATION}', '{}', {CURRENT_SCHEMA_REVISION}, '{CURRENT_SCHEMA_SHA256}');",
-                "1.0.0"
+                SCHEMA_APPLICATION_VERSION
             ))).execute(&mut connection).await
             .unwrap();
         connection.close().await.unwrap();

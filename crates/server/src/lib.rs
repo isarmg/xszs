@@ -3,16 +3,21 @@ mod api_access;
 mod audit;
 mod auth;
 pub mod config;
+mod config_definition;
 mod crypto;
 mod database;
+mod database_definition;
 mod error;
 mod library;
 mod login_admission;
 mod media_delivery;
 mod metrics;
+mod persistent_crypto_definition;
 mod rooted_fs;
 mod routes;
 mod runtime_lock;
+pub mod runtime_validation;
+mod secret_definition;
 mod secrets;
 mod storage;
 mod upload_commit;
@@ -20,8 +25,6 @@ mod web_assets;
 
 #[cfg(test)]
 mod database_tests;
-
-pub mod offline;
 
 use anyhow::Result;
 use config::Config;
@@ -75,15 +78,12 @@ pub async fn serve(config: Config) -> Result<()> {
     let signals = xcss::server_runtime::ProcessSignals::install()?;
     let listeners = xcss::server_runtime::BoundListeners::bind([config.bind])?;
     let transport = xcss::server_runtime::HttpServer::new(listeners, signals);
-    xcss::server_cli::runtime_allowed(&config.data_dir).map_err(xcss::server_cli::CliError)?;
-    offline::validate_runtime_inputs(&config).await?;
+    runtime_validation::validate_runtime_inputs(&config).await?;
     let directory = xcss::state_file::PrivateStateDirectory::open(&config.data_dir)?;
-    xcss::server_cli::runtime_allowed(directory.path()).map_err(xcss::server_cli::CliError)?;
     let _common_lock = directory.try_instance_lock()?;
-    xcss::server_cli::runtime_allowed(directory.path()).map_err(xcss::server_cli::CliError)?;
     let _runtime_lock =
         runtime_lock::RuntimeLock::acquire(&config.database_url, &config.storage_dir)?;
-    let credentials_key = offline::validate_state(&config).await?;
+    let credentials_key = runtime_validation::validate_state(&config).await?;
     enable_runtime_logging(&config.root)?;
     tracing::info!(event = "common.config.loaded");
     let pool = database::connect_validated_location(&_runtime_lock.database_url()?).await?;
@@ -179,13 +179,9 @@ pub async fn serve(config: Config) -> Result<()> {
     Ok(())
 }
 
-static LOG_LAYER: std::sync::OnceLock<xcss::log::XcssStructuredLayer> = std::sync::OnceLock::new();
 fn initialize_logging(log_level: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
     let layer = xcss::log::XcssStructuredLayer::new("xszs")?;
-    LOG_LAYER
-        .set(layer.clone())
-        .map_err(|_| anyhow::anyhow!("logging already initialized"))?;
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::try_new(log_level)?)
         .with(layer)
@@ -199,9 +195,10 @@ fn enable_runtime_logging(root: &std::path::Path) -> anyhow::Result<()> {
         "xszs",
         xcss::log::LogRetention::default(),
     )?;
-    LOG_LAYER
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("logging is unavailable"))?
-        .set_rotating_file(file)?;
+    xcss::log::install_rotating_file(file)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/administrator.rs"]
+mod test_support;

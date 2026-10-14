@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use crate::config_definition::DEFAULT_BIND;
 use std::{
     collections::BTreeMap,
     env,
@@ -10,8 +11,6 @@ use xcss::config::Override;
 use xcss::config::{ConfigSource, EnvMapping, EnvValueKind};
 
 use anyhow::{Context, Result};
-
-const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
 #[derive(Clone)]
 pub struct Config {
@@ -47,50 +46,33 @@ impl Config {
         };
 
         let config = normalize_config_path(config)?;
-        let file = xcss::config::read_private_file(&config)?;
+        let file = xcss::config::read_managed_file(
+            &config,
+            cfg!(debug_assertions) && env!("XSZS_SOURCE_REVISION") == "unbound",
+        )?;
         let environment = xcss::config::read_environment(ENVIRONMENT, |name| env::var(name).ok())?;
         let loaded = xcss::config::resolve_validated(
             &defaults,
             Some(&file),
             &environment,
             &[],
-            validate_intrinsic,
+            |settings, source| {
+                crate::config_definition::validate(
+                    settings,
+                    root,
+                    env!("XSZS_SOURCE_REVISION") != "unbound",
+                    source,
+                )
+            },
         )?;
         let settings = loaded.value;
         let data_dir = settings.data_dir.context("data_dir is required")?;
-        anyhow::ensure!(data_dir.is_absolute(), "data_dir must be absolute");
-        validate_state_location(root, &data_dir)?;
         let database_url = format!("sqlite://{}", data_dir.join("xszs.sqlite3").display());
         crate::database::database_path(&database_url)?;
         let storage_dir = settings
             .storage_dir
             .unwrap_or_else(|| data_dir.join("media"));
-        anyhow::ensure!(storage_dir.is_absolute(), "storage_dir must be absolute");
-        validate_state_location(root, &storage_dir)?;
-        anyhow::ensure!(
-            !data_dir.starts_with(&storage_dir),
-            "storage_dir cannot contain the internal data_dir"
-        );
-        anyhow::ensure!(
-            !storage_dir
-                .components()
-                .chain(data_dir.components())
-                .any(|part| part == std::path::Component::ParentDir),
-            "state and storage paths cannot contain parent traversal"
-        );
         let bind = settings.bind;
-        anyhow::ensure!(
-            (16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes),
-            "max_part_bytes must be between 16 MiB and 64 MiB to support mobile uploads"
-        );
-        anyhow::ensure!(
-            settings.upload_global_concurrency > 0 && settings.upload_per_instance_concurrency > 0,
-            "upload concurrency must be positive"
-        );
-        anyhow::ensure!(
-            settings.upload_per_instance_concurrency <= settings.upload_global_concurrency,
-            "upload_per_instance_concurrency cannot exceed upload_global_concurrency"
-        );
         validate_security_mode(bind, settings.development)?;
         if let Some(path) = &settings.development_web_dir {
             anyhow::ensure!(
@@ -118,37 +100,9 @@ impl Config {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Settings {
-    data_dir: Option<PathBuf>,
-    storage_dir: Option<PathBuf>,
-    log_level: String,
-    bind: SocketAddr,
-    max_part_bytes: usize,
-    upload_global_concurrency: usize,
-    upload_per_instance_concurrency: usize,
-    metrics_token: Option<String>,
-    development: bool,
-    development_web_dir: Option<PathBuf>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            data_dir: Some(PathBuf::from("/opt/isarmg/xszs/state")),
-            storage_dir: None,
-            log_level: "info".into(),
-            bind: DEFAULT_BIND.parse().expect("valid default bind"),
-            max_part_bytes: 64 * 1024 * 1024,
-            upload_global_concurrency: 16,
-            upload_per_instance_concurrency: 4,
-            metrics_token: None,
-            development: false,
-            development_web_dir: None,
-        }
-    }
-}
+use crate::config_definition::Settings;
+#[cfg(test)]
+use crate::config_definition::validate_intrinsic;
 
 const ENVIRONMENT: &[EnvMapping<'static>] = &[
     EnvMapping {
@@ -259,53 +213,6 @@ mod tests {
         assert!(validate_security_mode("127.0.0.1:8080".parse().unwrap(), false).is_ok());
         assert!(validate_security_mode("0.0.0.0:8080".parse().unwrap(), false).is_ok());
     }
-}
-
-fn validate_intrinsic(
-    settings: &Settings,
-    source: ConfigSource,
-) -> Result<(), xcss::config::ConfigError> {
-    let invalid =
-        |path| xcss::config::ConfigError::new(xcss::config::Reason::InvalidValue, path, source);
-
-    if settings
-        .data_dir
-        .as_ref()
-        .is_some_and(|path| !path.is_absolute())
-    {
-        return Err(invalid("/data_dir"));
-    }
-    if !(16 * 1024 * 1024..=64 * 1024 * 1024).contains(&settings.max_part_bytes) {
-        return Err(invalid("/max_part_bytes"));
-    }
-    if settings
-        .storage_dir
-        .as_ref()
-        .is_some_and(|path| !path.is_absolute())
-    {
-        return Err(invalid("/storage_dir"));
-    }
-    if !matches!(
-        settings.log_level.as_str(),
-        "error" | "warn" | "info" | "debug" | "trace" | "off"
-    ) {
-        return Err(invalid("/log_level"));
-    }
-    for (path, value) in [
-        (
-            "/upload_global_concurrency",
-            settings.upload_global_concurrency,
-        ),
-        (
-            "/upload_per_instance_concurrency",
-            settings.upload_per_instance_concurrency,
-        ),
-    ] {
-        if value == 0 || value > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err(invalid(path));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -497,36 +404,4 @@ mod state_configuration_tests {
             .is_err()
         );
     }
-}
-
-fn validate_state_location(root: &Path, state: &Path) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        state.is_absolute()
-            && state != Path::new("/")
-            && state.components().all(|part| matches!(
-                part,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )),
-        "state paths must be normalized absolute directories"
-    );
-    anyhow::ensure!(
-        !root.starts_with(state),
-        "state directory cannot contain the installation root"
-    );
-    for name in [
-        "config",
-        "logs",
-        "run",
-        "bin",
-        "libexec",
-        "share",
-        "maintenance",
-    ] {
-        let protected = root.join(name);
-        anyhow::ensure!(
-            !state.starts_with(&protected) && !protected.starts_with(state),
-            "state directory overlaps a protected installation path"
-        );
-    }
-    Ok(())
 }

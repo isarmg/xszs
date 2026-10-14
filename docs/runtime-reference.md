@@ -10,7 +10,7 @@
 用户管理等业务位于 `/api/v1/admin/*`，移动端仍只使用 `/v1/*`。管理员 username 规范化、严格
 当前 Argon2id、登录准入、Session/CSRF 生命周期、Cookie 和安全审计均由 xcss 的
 Admin Core、SQLite Store、Axum Adapter 拥有。空闲 30 分钟、绝对 12 小时、每管理员 32 个/全局 1024 个
-Session 是固定平台策略，不提供产品级 TTL 配置。管理员登录仅受密码计算和请求体的全局资源预算约束，不按 IP、账号或会话建立失败次数或频率窗口。
+Session 是固定平台策略，不提供产品级 TTL 配置。管理员登录按实际数据库每 60 秒最多 60 次尝试；所有已接收尝试计入，成功不清空计数，达到上限返回 429 且不会延长窗口。请求体和密码计算仍受全局资源预算约束，不按 IP、任意账号或会话创建计数桶。
 
 管理实例列表的 `GET /api/v1/admin/overview` 每页最多 50 个账户，响应额外包含
 `previous_cursor`、`next_cursor` 和全局 `online_users`。其余全局 total/unlimited/used/pending/quota
@@ -42,8 +42,8 @@ Android/iOS 只向 `/v1/auth/bootstrap` 提交服务器地址、实例授权码�
 
 ## 6. 当前数据库合同
 
-服务端软件版本是 `1.0.3`，但数据库合同独立保持不变：`product_metadata` 必须精确为
-`application=xszs`、`application_version=1.0.0`、
+服务端软件版本是 `1.0.0`，数据库合同使用 `v1`：`product_metadata` 必须精确为
+`application=xszs`、`application_version=v1`、
 `schema_revision=1`，Schema SHA-256 为
 `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`。移动队列对应
 `xszc` 1.0.0、schema revision 1 与 SHA-256
@@ -82,4 +82,4 @@ blob rooted unlink/删行及 committed/orphan staging 清理。协调不周期�
 
 ## 公共接口标识
 
-当前版本只使用 `.state-instance.lock`、`.state-maintenance.lock`、`.state-maintenance-pending.json` 和 `.state-atomic-` 临时文件前缀。服务身份头为 `x-service`，健康状态中的公共源码修订字段为 `common_revision`。管理会话采用 `__Host-admin-xszs-session`，显式开发模式采用 `admin-xszs-session`；生产 Cookie 的 Secure、HttpOnly、SameSite、Path 和 CSRF 约束继续生效。资源清单格式为 `web-assets-v1`，公共数据库内部表及索引采用 `_common_` 前缀。
+当前 Server 使用 `.state-instance.lock`、数据库和存储的实际运行互斥锁；工具互斥由独立安装维护程序管理。服务身份头为 `x-service`，健康状态中的公共源码修订字段为 `common_revision`。管理会话采用 `__Host-admin-xszs-session`，显式开发模式采用 `admin-xszs-session`；生产 Cookie 的 Secure、HttpOnly、SameSite、Path 和 CSRF 约束继续生效。资源清单格式为 `web-assets-v1`，公共数据库内部表及索引采用 `_common_` 前缀。

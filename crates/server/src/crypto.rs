@@ -1,16 +1,10 @@
 use std::sync::Arc;
 
 use xcss::secret::{SecretBytes, SecretKey};
-use xcss::secret_envelope::EnvelopeDomain;
 
 use crate::error::AppError;
 
-struct ClientAuthorizationEnvelope;
-
-impl EnvelopeDomain for ClientAuthorizationEnvelope {
-    const DOMAIN: &'static [u8] = b"xszs/client-authorization";
-    const REVISION: u16 = 1;
-}
+use crate::persistent_crypto_definition::ClientAuthorizationEnvelope;
 
 #[derive(Clone)]
 pub struct SecretBox {
@@ -98,4 +92,55 @@ pub async fn validate_persisted_authorizations(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod installation_vector_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    #[test]
+    fn current_authorization_material_matches_runtime_decryption() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schema/validation/authorization.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let input = &case["input"];
+            let valid = (|| -> anyhow::Result<()> {
+                let key: [u8; 32] = hex::decode(input["key_hex"].as_str().unwrap())?
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("bad key"))?;
+                let identity = hex::decode(input["identity_hex"].as_str().unwrap())?;
+                let identity = if identity.len() == 16 {
+                    uuid::Uuid::from_slice(&identity)?
+                } else {
+                    uuid::Uuid::parse_str(std::str::from_utf8(&identity)?)?
+                };
+                let ciphertext = STANDARD.decode(input["ciphertext_base64"].as_str().unwrap())?;
+                let plaintext = SecretBox::new(&key)
+                    .decrypt_client_authorization(&identity.to_string(), &ciphertext)?;
+                anyhow::ensure!(
+                    plaintext.len() == 36
+                        && plaintext
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+                    "invalid code"
+                );
+                use sha2::Digest as _;
+                anyhow::ensure!(
+                    hex::decode(input["digest_hex"].as_str().unwrap())?
+                        == sha2::Sha256::digest(plaintext.as_bytes()).as_slice(),
+                    "digest mismatch"
+                );
+                Ok(())
+            })()
+            .is_ok();
+            assert_eq!(
+                valid,
+                case["valid"].as_bool().unwrap(),
+                "runtime differs from installation case {}",
+                case["name"]
+            );
+        }
+    }
 }

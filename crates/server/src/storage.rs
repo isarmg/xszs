@@ -54,6 +54,7 @@ impl LocalStorage {
         })
     }
 
+    #[cfg(test)]
     pub async fn new(root: PathBuf) -> Result<Self, AppError> {
         fs::create_dir_all(&root).await?;
         let files = RootedFs::new(&root)?;

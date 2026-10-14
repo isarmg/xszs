@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "xszs", version, about = "Media library service")]
 struct Cli {
-    #[arg(long, default_value = "/opt/isarmg/xszs")]
+    #[arg(long)]
     root: PathBuf,
 }
 #[tokio::main]

@@ -144,7 +144,7 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
     if !config.data_dir.join("secrets.json").exists() {
         xcss::server_secrets::initialize(
             &config.data_dir,
-            &crate::secrets::Secrets {
+            &crate::secret_definition::Secrets {
                 credentials_key: [7; 32],
             },
         )
@@ -155,14 +155,14 @@ async fn test_state(database: &Path, data: &Path) -> (AppState, SqlitePool) {
     );
     use xcss::admin_core::AdministratorStore as _;
     if service.store().administrator_count().await.unwrap() == 0 {
-        service
-            .bootstrap_administrator(
-                ADMIN_USERNAME,
-                ADMIN_PASSWORD,
-                crate::offline::current_time_micros().unwrap(),
-            )
-            .await
-            .unwrap();
+        crate::test_support::seed_administrator(
+            &service,
+            ADMIN_USERNAME,
+            ADMIN_PASSWORD,
+            crate::runtime_validation::current_time_micros().unwrap(),
+        )
+        .await
+        .unwrap();
     }
     let credentials_key = crate::secrets::load(&config.data_dir)
         .unwrap()
