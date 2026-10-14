@@ -18,6 +18,13 @@
 资产、资源、标签在同一读事务中批量查询；单页为一次 ID 查询和三次批量摘要查询，消除逐资产查询。
 `GET /v1/devices` 返回当前账户的 `{device_id,name,platform}` 数组。
 
+## 重复项分组
+
+`GET /v1/duplicates` 按当前账户内的相同内容分组，仅统计未在回收站中的 primary 资源。
+同一资产的多个 primary 资源指向同一内容时，组内该资产只出现一次；至少两个不同资产才形成分组。
+分组、成员和摘要在同一读事务中读取。分组按资产数降序、blob 创建时间及 UUID 排序，
+成员按资产创建时间及 UUID 排序；limit 限制分组数，默认 50、最大 200。
+
 ## 首次缓存与增量
 
 1. 请求 `GET /v1/sync/head`，保存 `{sequence,snapshot_protocol:"watermark-before-uuid-walk-v1"}`。

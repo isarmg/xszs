@@ -33,6 +33,9 @@ const PASSWORD: &str = "correct-horse-battery-staple";
 #[path = "tag_limit_tests.rs"]
 mod tag_limit_tests;
 
+#[path = "upload_retry_tests.rs"]
+mod upload_retry_tests;
+
 struct TestWorkspace {
     root: PathBuf,
 }
@@ -4077,4 +4080,72 @@ async fn production_auth_uses_origin_and_secure_cookie_without_forwarded_proto()
     assert!(rejected.status().is_client_error());
     assert_ne!(rejected.status(), StatusCode::UPGRADE_REQUIRED);
     pool.close().await;
+}
+
+#[tokio::test]
+async fn duplicate_groups_return_each_asset_once_when_primary_resources_share_a_blob() {
+    let workspace = TestWorkspace::new();
+    let (state, pool) = test_state(&workspace.database(), &workspace.data()).await;
+    let (account, device) =
+        seed_account(&pool, "blobs/duplicate-members", "duplicate-members").await;
+    let token = "duplicate-members-token";
+    sqlx::query("UPDATE devices SET token_hash=? WHERE id=?")
+        .bind(sha2::Sha256::digest(token.as_bytes()).to_vec())
+        .bind(device)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut assets = Vec::new();
+    for suffix in ["first", "second"] {
+        let upload = seed_received_upload(&state, account, device, b"same content", suffix).await;
+        assets.push(
+            upload_commit::complete(&state, upload, account)
+                .await
+                .unwrap()
+                .asset_id,
+        );
+    }
+    // Exercise the public upload contract instead of inventing an invalid stored row.
+    let mut manifest: Value = sqlx::query_scalar("SELECT request FROM uploads WHERE asset_id=?")
+        .bind(assets[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    manifest["source_resource_id"] = json!("additional-primary");
+    let app = test_router(state).await;
+    let added = json_body(
+        send(
+            &app,
+            json_request(Method::POST, "/v1/uploads", manifest, Some(token), None),
+            StatusCode::OK,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(added["disposition"], "complete");
+    let primary_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM resources WHERE asset_id=? AND role='primary'")
+            .bind(assets[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(primary_count, 2);
+    let groups = get_json(&app, "/v1/duplicates", token).await;
+    let groups = groups.as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    let members = groups[0]["assets"].as_array().unwrap();
+    assert_eq!(
+        members.len(),
+        2,
+        "a duplicate group lists assets, not resource references"
+    );
+    for asset in assets {
+        assert_eq!(
+            members
+                .iter()
+                .filter(|member| member["asset_id"] == asset.to_string())
+                .count(),
+            1
+        );
+    }
 }

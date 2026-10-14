@@ -865,6 +865,8 @@ pub async fn duplicate_groups(
     ContractQuery(query): ContractQuery<DuplicateQuery>,
 ) -> Result<Json<Vec<DuplicateGroup>>, AppError> {
     let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
+    // Keep grouping, membership, and summaries on the same read snapshot.
+    let mut transaction = state.pool.begin().await?;
     let rows = sqlx::query(
         r#"
         SELECT b.id AS blob_id, b.content_blake3, b.plaintext_size,
@@ -875,29 +877,29 @@ pub async fn duplicate_groups(
         WHERE b.account_id = ? AND a.deleted_at IS NULL AND r.role = 'primary'
         GROUP BY b.id, b.content_blake3, b.plaintext_size
         HAVING COUNT(DISTINCT a.id) > 1
-        ORDER BY COUNT(DISTINCT a.id) DESC, b.created_at
+        ORDER BY COUNT(DISTINCT a.id) DESC, b.created_at, b.id
         LIMIT ?
         "#,
     )
     .bind(auth.account_id)
     .bind(limit)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *transaction)
     .await?;
     let mut groups = Vec::with_capacity(rows.len());
     for row in rows {
         let blob_id: Uuid = row.get("blob_id");
         let ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT a.id FROM assets a \
+            "SELECT DISTINCT a.id FROM assets a \
              JOIN resources r ON r.asset_id = a.id \
              WHERE r.blob_id = ? AND a.deleted_at IS NULL AND r.role = 'primary' \
-             ORDER BY a.created_at",
+             ORDER BY a.created_at,a.id",
         )
         .bind(blob_id)
-        .fetch_all(&state.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let mut assets = Vec::with_capacity(ids.len());
-        for asset_id in ids {
-            assets.push(load_asset_summary(&state.pool, auth.account_id, asset_id).await?);
+        for batch in ids.chunks(250) {
+            assets.extend(load_asset_summaries(&mut transaction, auth.account_id, batch).await?);
         }
         groups.push(DuplicateGroup {
             content_blake3: row.get("content_blake3"),
@@ -905,6 +907,7 @@ pub async fn duplicate_groups(
             assets,
         });
     }
+    transaction.commit().await?;
     Ok(Json(groups))
 }
 
