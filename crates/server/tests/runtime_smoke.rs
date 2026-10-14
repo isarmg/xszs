@@ -1,4 +1,5 @@
-//! Real candidate-process HTTP smoke. Private fixture provisioning is not an installer test.
+//! Real candidate-process HTTP smoke with development:true on loopback.
+//! Private fixture provisioning is not an installer or production-TLS test.
 #[path = "support/database.rs"]
 mod database;
 
@@ -33,6 +34,8 @@ impl Server {
         loop {
             let ready = Command::new("curl")
                 .args([
+                    "--noproxy",
+                    "*",
                     "--silent",
                     "--fail",
                     "--max-time",
@@ -90,6 +93,8 @@ fn request(
     let mut command = Command::new("curl");
     command
         .args([
+            "--noproxy",
+            "*",
             "--silent",
             "--show-error",
             "--fail",
