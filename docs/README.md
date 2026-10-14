@@ -16,6 +16,6 @@ xszs 接收 xszc 手机客户端的照片和视频，并提供浏览器管理页
 - [图库 API](gallery-api.md)、[接口消费者](interface-consumers.md)。
 - [架构](architecture.md)、[功能设计参考](feature-inventory-and-tradeoffs.md)、[仓库职责](repository-boundary.md)。
 - [账号设置](account-settings.md)、[公共支撑](common-support.md)、[安全审查](unsafe-audit.md)。
-- [当前 1.0.0 发行说明](releases/1.0.0.md)
+- [当前 1.0.1 发行说明](releases/1.0.1.md)
 
-服务端软件版本为 `1.0.0`，当前数据库身份为 `v1`，数据库结构修订为 1；它们分别管理。Android/iOS 应用与本地队列属于独立 [xszc 项目](https://github.com/isarmg/xszc)。
+服务端软件版本为 `1.0.1`，当前数据库身份为 `v1`，数据库结构修订为 1；它们分别管理。Android/iOS 应用与本地队列属于独立 [xszc 项目](https://github.com/isarmg/xszc)。

@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "xszs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "xszs-protocol"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
