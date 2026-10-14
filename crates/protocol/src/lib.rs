@@ -4,6 +4,16 @@ use uuid::Uuid;
 pub const API_VERSION: &str = "v1";
 pub const API_BASE_PATH: &str = "/v1";
 
+/// Required by POST /v1/uploads, outside the CreateUploadRequest JSON body.
+/// Persist one non-nil UUID per prepared generation and reuse it for every retry,
+/// including after process restart. A changed manifest requires a new operation.
+pub const UPLOAD_OPERATION_HEADER: &str = "x-upload-operation";
+
+/// Shared validation for the server header and the client's persisted generation.
+pub fn parse_upload_operation(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value).ok().filter(|id| !id.is_nil())
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyRequest {}
@@ -280,6 +290,16 @@ pub struct ResourceManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_operation_is_a_required_non_nil_uuid() {
+        let id = Uuid::new_v4();
+        assert_eq!(parse_upload_operation(&id.to_string()), Some(id));
+        for invalid in ["", "not-a-uuid", "00000000-0000-0000-0000-000000000000"] {
+            assert_eq!(parse_upload_operation(invalid), None);
+        }
+        assert_eq!(UPLOAD_OPERATION_HEADER, "x-upload-operation");
+    }
 
     #[test]
     fn empty_action_request_is_an_exact_dto() {

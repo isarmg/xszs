@@ -21,7 +21,8 @@ use xcss::server_cli::{ContractJson, ContractPath};
 use xszs_protocol::{
     API_BASE_PATH, BootstrapRequest, BootstrapResponse, CompleteUploadResponse,
     CreateUploadRequest, CreateUploadResponse, EmptyRequest, MediaKind, ResourceManifest,
-    StorageEncoding, UploadDisposition, UploadPartSpec, UploadStatusResponse,
+    StorageEncoding, UPLOAD_OPERATION_HEADER, UploadDisposition, UploadPartSpec,
+    UploadStatusResponse, parse_upload_operation,
 };
 
 use crate::{
@@ -365,10 +366,9 @@ async fn create_upload(
     ContractJson(request): ContractJson<CreateUploadRequest>,
 ) -> Result<Json<CreateUploadResponse>, AppError> {
     let operation_id = headers
-        .get("x-upload-operation")
+        .get(UPLOAD_OPERATION_HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .filter(|id| !id.is_nil())
+        .and_then(parse_upload_operation)
         .ok_or_else(|| AppError::bad_request("X-Upload-Operation must be a non-nil UUID"))?;
     validate_upload_request(&request, state.config.max_part_bytes)?;
     let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
