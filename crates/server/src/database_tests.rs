@@ -318,6 +318,9 @@ fn json_request(
         .header(header::HOST, "localhost")
         .header(header::ORIGIN, "http://localhost")
         .header("sec-fetch-site", "same-origin");
+    if uri.as_ref() == "/v1/uploads" {
+        builder = builder.header("x-upload-operation", Uuid::new_v4().to_string());
+    }
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }

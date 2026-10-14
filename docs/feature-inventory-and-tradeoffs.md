@@ -88,7 +88,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-U-005 | parts 必须从 0 连续编号、非空、每块不超过 `MAX_PART_BYTES`，sizes 总和等于 content size | `validate_upload_request` | 保障 | 高 | 缺块、重叠或溢出会导致错误拼装 | 空文件、零块、gap、overflow、超大 part |
 | MED-U-006 | 每块和完整对象使用 64 hex BLAKE3 | Client `crates/crypto`、Server storage/commit | 保障 | 高 | 传输损坏、错序和去重碰撞无法被当前流程识别 | 大小写 hex、错误 part、错误 full hash、篡改 |
 | MED-U-007 | create upload 对相同账户内容先检查已有 blob，文件与 size/full hash 均匹配才去重 | `create_upload`、`inspect_object` | 核心 | 高 | 相同媒体重复占空间；只信 DB 会复用损坏文件 | 同账户正例、跨账户隔离、DB/file mismatch |
-| MED-U-008 | 同 device/source_resource/full hash 的 active upload 返回原 upload 与缺块列表 | uploads lookup、`missing_parts` | 保障 | 高 | 移动网络重试会创建重复暂存和配额预留 | 同请求、不同 hash、已 commit、并发 create |
+| MED-U-008 | create 必须携带稳定 UUID `X-Upload-Operation`；同账户/实例、同 operation、相同完整 manifest 重试返回原缺块/提交结果，已有后续提交则 `upload_superseded`；新 generation 不按内容 Hash 合并 | `replay_upload_operation` | 保障 | 高 | 移动网络重试会创建重复暂存和配额预留 | 同请求、不同 hash、已 commit、并发 create |
 | MED-U-009 | quota 在创建时计入已用 blob、活跃上传预留和本次总 bytes；0 表示不限 | `ensure_quota` | 保障 | 高 | 单账户可占满共享盘，或并发 upload 越过额度 | 边界、并发预留、overflow、unlimited |
 | MED-U-010 | part PUT 在写入前同时取得全局和每账户 admission permit，等待 30 秒后 429 | `UploadAdmission`、`put_part`、Config | 保障 | 高 | 单账户或并发客户端可占满分块写入资源 | create/complete 不经过该闸门；timeout/Retry-After、permit 回收 |
 | MED-U-011 | part body 流式写入临时普通文件，实时限制 bytes、校验 size/hash 并 fsync | `LocalStorage::put_part` | 保障 | 高 | 整块缓冲耗内存；成功响应前数据可能未落盘 | 慢流、截断、超长、hash 错、取消、fsync 错 |

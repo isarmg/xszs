@@ -83,3 +83,14 @@ blob rooted unlink/删行及 committed/orphan staging 清理。协调不周期�
 ## 公共接口标识
 
 当前 Server 使用 `.state-instance.lock`、数据库和存储的实际运行互斥锁；工具互斥由独立安装维护程序管理。服务身份头为 `x-service`，健康状态中的公共源码修订字段为 `common_revision`。管理会话采用 `__Host-admin-xszs-session`，显式开发模式采用 `admin-xszs-session`；生产 Cookie 的 Secure、HttpOnly、SameSite、Path 和 CSRF 约束继续生效。资源清单格式为 `web-assets-v1`，公共数据库内部表及索引采用 `_common_` 前缀。
+
+### 上传创建重试标识
+
+`POST /v1/uploads` 必须携带 `X-Upload-Operation: <non-nil UUID>`。
+移动端使用已持久化的准备 generation UUID；创建响应丢失、分块重试和进程重启后继续使用同一个 UUID。
+服务端将此 UUID 用作上传/去重回执 ID，且绑定到已认证账户、实例和完整 manifest。
+缺失或非法 UUID 返回 400；不同 manifest 重用同一 UUID 或其他账户/实例复用返回 409。
+相同 operation 的重试不会再写入资源元数据或追加回执：接收阶段返回原缺块列表，提交后返回原资源 ID。
+若同一资源已有后续成功提交，旧 operation 返回 `upload_superseded`，不会恢复旧内容。
+真实的新版本（包括 A→B→A 或只更新 metadata）必须使用新的准备 generation UUID；相同内容的新 operation 不与未完成旧 operation 合并。
+本契约不改变资源 manifest JSON 或数据库 Schema。

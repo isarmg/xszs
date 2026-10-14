@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Extension, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::{get, post, put},
 };
@@ -361,10 +361,23 @@ fn valid_pairing_authorization_code(value: &str) -> bool {
 async fn create_upload(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
     ContractJson(request): ContractJson<CreateUploadRequest>,
 ) -> Result<Json<CreateUploadResponse>, AppError> {
+    let operation_id = headers
+        .get("x-upload-operation")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| AppError::bad_request("X-Upload-Operation must be a non-nil UUID"))?;
     validate_upload_request(&request, state.config.max_part_bytes)?;
     let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(response) =
+        replay_upload_operation(&mut transaction, operation_id, &auth, &request).await?
+    {
+        transaction.commit().await?;
+        return verified_upload_replay(&state, operation_id, &auth, &request, response).await;
+    }
     let policy = account_policy_for_update(&mut transaction, auth.account_id).await?;
     let existing_blob = sqlx::query(
         "SELECT id, storage_path, stored_size FROM blobs WHERE account_id = ? AND content_blake3 = ?",
@@ -396,6 +409,14 @@ async fn create_upload(
             ));
         }
         let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Hashing releases the write lock. A concurrent retry may have created
+        // this operation while the object was being verified.
+        if let Some(response) =
+            replay_upload_operation(&mut transaction, operation_id, &auth, &request).await?
+        {
+            transaction.commit().await?;
+            return verified_upload_replay(&state, operation_id, &auth, &request, response).await;
+        }
         let blob_still_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM blobs WHERE id = ? AND account_id = ? \
              AND content_blake3 = ? AND storage_path = ? AND stored_size = ?)",
@@ -417,7 +438,7 @@ async fn create_upload(
         // Deduplication is a completed backup too. Record it in the same ordered
         // receipt ledger as uploaded resources so an older in-flight upload
         // cannot overwrite this version when it eventually completes.
-        let receipt_id = Uuid::new_v4();
+        let receipt_id = operation_id;
         sqlx::query(
             r#"INSERT INTO uploads(
                  id,account_id,device_id,asset_id,source_resource_id,content_blake3,request,
@@ -469,33 +490,6 @@ async fn create_upload(
 
     let asset_id = upsert_asset(&mut transaction, &auth, &request).await?;
 
-    let existing_upload: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT id FROM uploads
-        WHERE account_id = ? AND device_id = ? AND asset_id = ? AND source_resource_id = ?
-          AND content_blake3 = ? AND state = 'uploading'
-          AND commit_state IN ('receiving', 'commit_started', 'finalizing')
-        ORDER BY created_at DESC LIMIT 1
-        "#,
-    )
-    .bind(auth.account_id)
-    .bind(auth.device_id)
-    .bind(asset_id)
-    .bind(&request.source_resource_id)
-    .bind(&request.content_blake3)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    if let Some(upload_id) = existing_upload {
-        transaction.commit().await?;
-        let missing_parts = missing_parts(&state.pool, upload_id).await?;
-        return Ok(Json(CreateUploadResponse {
-            disposition: UploadDisposition::Upload,
-            upload_id: Some(upload_id),
-            resource_id: None,
-            missing_parts,
-        }));
-    }
-
     ensure_quota(
         &mut transaction,
         auth.account_id,
@@ -515,7 +509,7 @@ async fn create_upload(
         RETURNING id
         "#,
     )
-    .bind(Uuid::new_v4())
+    .bind(operation_id)
     .bind(auth.account_id)
     .bind(auth.device_id)
     .bind(asset_id)
@@ -542,6 +536,95 @@ async fn create_upload(
         resource_id: None,
         missing_parts: request.parts.iter().map(|part| part.index).collect(),
     }))
+}
+
+// Receipt replay retains the complete endpoint's physical-object validation.
+// Hash outside the SQLite write lock, then recheck ordering before reporting
+// success: a newer operation may have committed while the hash was running.
+async fn verified_upload_replay(
+    state: &AppState,
+    operation_id: Uuid,
+    auth: &AuthContext,
+    request: &CreateUploadRequest,
+    response: CreateUploadResponse,
+) -> Result<Json<CreateUploadResponse>, AppError> {
+    if matches!(response.disposition, UploadDisposition::Upload) {
+        return Ok(Json(response));
+    }
+    upload_commit::complete(state, operation_id, auth.account_id).await?;
+    let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let response = replay_upload_operation(&mut transaction, operation_id, auth, request)
+        .await?
+        .ok_or_else(|| AppError::conflict("upload operation is no longer available"))?;
+    transaction.commit().await?;
+    Ok(Json(response))
+}
+
+// The client supplies its durable preparation generation, including when the
+// first create response is lost. Content hashes cannot identify operations:
+// a deliberate A -> B -> A edit is distinct from retrying the original A.
+async fn replay_upload_operation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    operation_id: Uuid,
+    auth: &AuthContext,
+    request: &CreateUploadRequest,
+) -> Result<Option<CreateUploadResponse>, AppError> {
+    let row = sqlx::query(
+        "SELECT account_id, device_id, request, commit_state, commit_resource_id, commit_error \
+         FROM uploads WHERE id = ?",
+    )
+    .bind(operation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.get::<Uuid, _>("account_id") != auth.account_id
+        || row.get::<Uuid, _>("device_id") != auth.device_id
+    {
+        return Err(AppError::conflict("upload operation is unavailable"));
+    }
+    if row.get::<Value, _>("request") != serde_json::to_value(request)? {
+        return Err(AppError::conflict("upload operation manifest changed"));
+    }
+    let superseded: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM uploads newer JOIN uploads current ON current.id = ? \
+         WHERE newer.account_id = current.account_id AND newer.asset_id = current.asset_id \
+         AND newer.source_resource_id = current.source_resource_id \
+         AND newer.rowid > current.rowid AND newer.commit_state = 'committed')",
+    )
+    .bind(operation_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if superseded
+        || row.get::<Option<String>, _>("commit_error").as_deref()
+            == Some("superseded by newer committed resource")
+    {
+        return Err(AppError::upload_superseded());
+    }
+    match row.get::<String, _>("commit_state").as_str() {
+        "committed" => Ok(Some(CreateUploadResponse {
+            disposition: UploadDisposition::Complete,
+            upload_id: None,
+            resource_id: Some(row.try_get::<Uuid, _>("commit_resource_id")?),
+            missing_parts: Vec::new(),
+        })),
+        "receiving" | "commit_started" | "finalizing" => {
+            let missing: Vec<i32> = sqlx::query_scalar(
+                "SELECT part_index FROM upload_parts WHERE upload_id = ? AND received_at IS NULL ORDER BY part_index",
+            )
+            .bind(operation_id)
+            .fetch_all(&mut **transaction)
+            .await?;
+            Ok(Some(CreateUploadResponse {
+                disposition: UploadDisposition::Upload,
+                upload_id: Some(operation_id),
+                resource_id: None,
+                missing_parts: missing.into_iter().map(|index| index as u32).collect(),
+            }))
+        }
+        _ => Err(AppError::conflict("upload operation cannot be resumed")),
+    }
 }
 
 async fn upsert_asset(
