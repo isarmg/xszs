@@ -97,6 +97,9 @@ def stage_verified_server(binary:Path,destination:Path,revision:str)->None:
         if created:destination.unlink(missing_ok=True)
         raise
 
+def stage_original_notices(destination:Path,*,source:Path=SOURCE)->None:
+    shutil.copyfile(source/"LICENSE",destination/"LICENSE")
+
 def main()->None:
     if len(sys.argv)!=2:
         raise SystemExit(f"usage: {Path(__file__).name} /absolute/output-directory")
@@ -148,7 +151,7 @@ def main()->None:
         example=source/"config"/"config.json.example"
         if not example.exists():example=source/"config"/f"{PRODUCT}.json.example"
         shutil.copyfile(example,stage/"config/config.json.example")
-        shutil.copyfile(source/"LICENSE",stage/"share/LICENSE")
+        stage_original_notices(stage/"share",source=source)
         shutil.copyfile(source/"docs/server-release-readme.md",stage/"share/README.md")
         for suffix in ["state-contract","web-assets"]:
             shutil.copyfile(metadata/f"{PRODUCT}-{suffix}.json",stage/"share"/f"{suffix}.json")

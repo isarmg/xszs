@@ -140,6 +140,13 @@ for current_file in "${workflow_files[@]}"; do
       [[ "$line" == *" # "* ]] ||
         fail "$current_file:$line_number pinned action is missing a human-readable version comment"
 
+      if [[ "$action_ref" == actions/cache/* ]]; then
+        case "$action_ref" in
+          actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 | actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809) ;;
+          *) fail "$current_file:$line_number unreviewed cache action: $action_ref" ;;
+        esac
+      fi
+
       if [[ "$action_ref" == actions/checkout@* ]]; then
         ((++checkout_uses))
       elif [[ "$action_ref" == gradle/actions/setup-gradle@* ]]; then
