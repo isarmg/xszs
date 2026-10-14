@@ -16,8 +16,8 @@ function quotaBytes(value: FormDataEntryValue | null): number {
   }
   return bytes;
 }
-export function UserDetailsView({ user, reload }: { user: BackupUser; reload(): void }) {
-  return <div className="xcss-content-stack"><PairingAccount user={user} /><BackupStatus user={user} /><BackupUserForm user={user} reload={reload} /><InstanceManager user={user} reload={reload} /></div>;
+export function UserDetailsView({ user, reload, onSaved }: { user: BackupUser; reload(): void; onSaved(user: BackupUser): void }) {
+  return <div className="xcss-content-stack"><PairingAccount user={user} /><BackupStatus user={user} /><BackupUserForm user={user} onSaved={onSaved} /><InstanceManager user={user} reload={reload} /></div>;
 }
 
 function PairingAccount({ user }: { user: BackupUser }) {
@@ -33,7 +33,7 @@ function PairingAccount({ user }: { user: BackupUser }) {
   </section>;
 }
 
-function BackupUserForm({ user, reload }: { user: BackupUser; reload(): void }) {
+function BackupUserForm({ user, onSaved }: { user: BackupUser; onSaved(user: BackupUser): void }) {
   const { notify } = useAdminApplication();
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
@@ -42,9 +42,11 @@ function BackupUserForm({ user, reload }: { user: BackupUser; reload(): void }) 
     if (busy.current) return;
     busy.current = true; setPending(true); setFailure(null);
     try {
-      await request("/api/v1/admin/users/" + user.id, isBackupUser,
+      const updated = await request("/api/v1/admin/users/" + user.id,
+        (value): value is BackupUser => isBackupUser(value) && value.id === user.id,
         { method: "PUT", body: JSON.stringify(input) });
-      notify(t("备份实例已保存", "Backup instance saved")); reload();
+      onSaved(updated);
+      notify(t("备份实例已保存", "Backup instance saved"));
     } catch (error) { setFailure({ requestId: errorRequestId(error) }); }
     finally { busy.current = false; setPending(false); }
   }

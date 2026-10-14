@@ -76,6 +76,7 @@ try {
       const logQueries = [], overviewQueries = [], detailQueries = [];
       let users = [backupUser()], failCreate = true, failRotate = true, failDelete = true, oversizeNextLog = false;
       const expectedQuotaUpdates = [123456789, 107374182];
+      let holdQuotaResponse = false, releaseQuotaResponse;
       let holdRotate = false, releaseRotate;
       page.on("pageerror", error => errors.push(error.message));
       await page.route("**/api/v1/**", async route => {
@@ -149,6 +150,7 @@ try {
           const input = request.postDataJSON();
           assert.equal(input.quota_bytes, expectedQuotaUpdates.shift());
           Object.assign(users[0], input);
+          if (holdQuotaResponse) await new Promise(resolve => { releaseQuotaResponse = resolve; });
           return route.fulfill({ json: users[0] });
         }
         if (path === "/api/v1/admin/instances" && method === "POST") {
@@ -244,11 +246,22 @@ try {
       await expect(page.getByRole("complementary")).toHaveCount(0);
       await expect(page.getByText(code, { exact: true })).toBeVisible();
       const editForm = page.getByRole("form", { name: "编辑备份实例 验收备份账户", exact: true });
+      const originalForm = await editForm.elementHandle();
+      const detailRequestsBeforeSave = detailQueries.length;
+      holdQuotaResponse = true;
       await editForm.getByRole("button", { name: "保存设置" }).click();
       await expect.poll(() => expectedQuotaUpdates.length).toBe(1);
+      await expect.poll(() => typeof releaseQuotaResponse).toBe("function");
+      await expect(editForm.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+      await expect(editForm.getByLabel("配额（GiB，0 表示不限）")).not.toBeEditable();
+      holdQuotaResponse = false;
+      releaseQuotaResponse();
       await editForm.getByLabel("配额（GiB，0 表示不限）").fill("0.1");
       await editForm.getByRole("button", { name: "保存设置" }).click();
       await expect.poll(() => users[0].quota_bytes).toBe(107374182);
+      await expect(editForm).toHaveAttribute("aria-busy", "false");
+      assert.equal(detailQueries.length, detailRequestsBeforeSave, "validated save responses must not fetch and recreate the editable details form");
+      assert.ok(await originalForm.evaluate(element => element.isConnected), "rapid consecutive saves must preserve the original editable form and its second draft");
       const rotationCount = () => mutations.filter(item => item.path.endsWith("/authorization")).length;
       await page.getByRole("button", { name: "更换密码", exact: true }).click();
       const rotationDialog = page.getByRole("dialog", { name: "更换密码", exact: true });

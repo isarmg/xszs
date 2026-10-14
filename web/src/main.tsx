@@ -40,6 +40,10 @@ function Application() {
   const [creating, setCreating] = useState(false);
   const [createFailure, setCreateFailure] = useState<Failure | null>(null);
   const reload = () => setGeneration(value => value + 1);
+  const savedUser = (updated: BackupUser) => {
+    if (selectedUserFromLocation() !== updated.id) return;
+    setUser(current => current?.id === updated.id ? updated : current);
+  };
   async function createInstance() {
     if (creating) return;
     setCreating(true); setCreateFailure(null); window.location.hash = "instances";
@@ -70,7 +74,7 @@ function Application() {
     {view !== "account" && createFailure && <ErrorState requestId={createFailure.requestId}>{t("实例未能创建，请刷新列表核对后重试。", "The instance could not be created. Refresh the list before retrying.")}</ErrorState>}
     {view === "account" ? <AccountPage key={generation} /> : view === "instances" ? <OverviewView refreshGeneration={generation} /> : view === "logs" && selected === null ? <LogsView refreshGeneration={generation} instance={null} /> : failure ? <ErrorState requestId={failure.requestId} onRetry={reload}>{t("备份数据暂不可用，请重试。", "Backup data is temporarily unavailable. Please retry.")}</ErrorState>
       : user === null ? <LoadingState>{t("正在载入备份数据…", "Loading backup data…")}</LoadingState>
-      : view === "logs" ? user?.instances[0] ? <LogsView key={user.instances[0].id} refreshGeneration={generation} instance={user.instances[0]} /> : <EmptyState>{t("所选实例不存在。", "The selected instance does not exist.")}</EmptyState> : user ? <UserDetailsView key={user.id} user={user} reload={reload} /> : <EmptyState>{t("请选择一个备份实例。", "Select a backup instance.")}</EmptyState>}
+      : view === "logs" ? user?.instances[0] ? <LogsView key={user.instances[0].id} refreshGeneration={generation} instance={user.instances[0]} /> : <EmptyState>{t("所选实例不存在。", "The selected instance does not exist.")}</EmptyState> : user ? <UserDetailsView key={user.id} user={user} reload={reload} onSaved={savedUser} /> : <EmptyState>{t("请选择一个备份实例。", "Select a backup instance.")}</EmptyState>}
   </div>;
 }
 
