@@ -653,6 +653,18 @@ pub(crate) async fn remove_instance(
         if references != 0 {
             return Err(AppError::conflict("instance still owns backup records"));
         }
+        // Blob rows are the durable retry queue for failed physical deletion.
+        // Cascading them away would strand their files outside reconciliation.
+        let pending_blobs: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE account_id = ?)")
+                .bind(account_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if pending_blobs {
+            return Err(AppError::conflict(
+                "instance still has blobs awaiting reclamation",
+            ));
+        }
         write_instance_audit(&mut transaction, account_id, id, "device.instance.delete").await?;
         sqlx::query("DELETE FROM accounts WHERE id=?")
             .bind(account_id)
