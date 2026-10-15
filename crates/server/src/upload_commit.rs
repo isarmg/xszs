@@ -1140,30 +1140,57 @@ pub(crate) async fn reconcile_all(state: &AppState) -> Result<ReconcileReport, A
     report.orphan_upload_parts_removed = report.orphan_upload_parts_removed.saturating_add(removed);
     report.errors = report.errors.saturating_add(errors);
 
+    let (removed, errors) = reconcile_orphan_stages(state).await?;
+    report.orphan_stages_removed = report.orphan_stages_removed.saturating_add(removed);
+    report.errors = report.errors.saturating_add(errors);
+    Ok(report)
+}
+
+pub(crate) async fn reconcile_orphan_stages(state: &AppState) -> Result<(u64, u64), AppError> {
+    let mut removed_count = 0_u64;
+    let mut errors = 0_u64;
     let accounts: Vec<(Uuid, String)> =
         sqlx::query_as("SELECT id, storage_path FROM accounts ORDER BY id")
             .fetch_all(&state.pool)
             .await?;
-    let referenced: HashSet<String> = sqlx::query_scalar(
-        "SELECT commit_staged_key FROM uploads WHERE commit_staged_key IS NOT NULL",
-    )
-    .fetch_all(&state.pool)
-    .await?
-    .into_iter()
-    .collect();
     for (account_id, account_path) in accounts {
-        match state
-            .storage
-            .cleanup_orphan_staging(&account_path, &referenced)
-        {
-            Ok(removed) => {
-                report.orphan_stages_removed = report.orphan_stages_removed.saturating_add(removed);
-            }
+        let stages = match state.storage.commit_stages(&account_path) {
+            Ok(stages) => stages,
             Err(error) => {
-                report.errors = report.errors.saturating_add(1);
-                tracing::warn!(account_id = %account_id, ?error, "failed to clean orphan commit staging files");
+                errors = errors.saturating_add(1);
+                tracing::warn!(account_id = %account_id, ?error, "failed to scan orphan commit staging files");
+                continue;
             }
+        };
+        for (upload_id, staged_key) in stages {
+            // Scan without blocking writers, then keep a short writer lock
+            // from the current reference check through each individual unlink.
+            // A new commit persists its stage key before creating the file.
+            // The validated filename embeds its owning upload UUID; use that
+            // primary key rather than scanning historical operation receipts.
+            let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let referenced: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM uploads WHERE id = ? AND commit_staged_key = ?)",
+            )
+            .bind(upload_id)
+            .bind(&staged_key)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !referenced {
+                match state
+                    .storage
+                    .remove_commit_stage(&account_path, upload_id, &staged_key)
+                {
+                    Ok(true) => removed_count = removed_count.saturating_add(1),
+                    Ok(false) => {}
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(account_id = %account_id, ?error, "failed to clean orphan commit staging file");
+                    }
+                }
+            }
+            transaction.commit().await?;
         }
     }
-    Ok(report)
+    Ok((removed_count, errors))
 }

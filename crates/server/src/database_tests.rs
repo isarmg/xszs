@@ -4155,3 +4155,6 @@ async fn duplicate_groups_return_each_asset_once_when_primary_resources_share_a_
 
 #[path = "delete_cleanup_tests.rs"]
 mod delete_cleanup_tests;
+
+#[path = "staging_cleanup_tests.rs"]
+mod staging_cleanup_tests;

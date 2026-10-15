@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     future::poll_fn,
     path::{Path, PathBuf},
     pin::Pin,
@@ -455,14 +454,13 @@ impl LocalStorage {
         Ok(removed)
     }
 
-    pub(crate) fn cleanup_orphan_staging(
+    pub(crate) fn commit_stages(
         &self,
         configured_path: &str,
-        referenced_keys: &HashSet<String>,
-    ) -> Result<u64, AppError> {
+    ) -> Result<Vec<(Uuid, String)>, AppError> {
         let account = StorageKey::parse(configured_path)?;
         let directory = account.as_path().join("staging");
-        let mut removed = 0_u64;
+        let mut stages = Vec::new();
         for name in self.files.list_regular_files(&directory)? {
             let Some(name) = name.to_str() else {
                 continue;
@@ -470,13 +468,10 @@ impl LocalStorage {
             if !is_commit_stage_name(name) {
                 continue;
             }
-            let candidate = directory.join(name);
-            let key = path_to_key(&candidate)?;
-            if !referenced_keys.contains(&key) && self.files.remove_file(&candidate)? {
-                removed = removed.saturating_add(1);
-            }
+            let upload_id = Uuid::parse_str(&name[7..43]).map_err(|_| invalid_storage_key())?;
+            stages.push((upload_id, path_to_key(&directory.join(name))?));
         }
-        Ok(removed)
+        Ok(stages)
     }
 
     pub async fn open_blob(
@@ -546,7 +541,7 @@ impl LocalStorage {
     }
 
     #[cfg(all(test, target_os = "linux"))]
-    fn inject_before_rooted_operation_once(&self, hook: impl FnOnce() + Send + 'static) {
+    pub(crate) fn inject_before_rooted_operation_once(&self, hook: impl FnOnce() + Send + 'static) {
         self.files.inject_before_operation_once(hook);
     }
 }
