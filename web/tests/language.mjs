@@ -22,7 +22,8 @@ export async function checkWebLanguage(page, { routes, names = [] }) {
     assert.doesNotMatch(authored, /authorization code|pairing code/i, "Instance credentials must be called passwords");
     const attributes = await page.locator("[aria-label], [title], [placeholder]").evaluateAll(nodes => nodes.flatMap(node => ["aria-label", "title", "placeholder"].map(name => node.getAttribute(name) || "")).join("\n"));
     assert.doesNotMatch(names.reduce((value, name) => value.replaceAll(name, ""), attributes), /\p{Script=Han}/u);
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    const fits = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+    assert.ok(fits, JSON.stringify(await page.evaluate(() => ({ url:location.href, width:innerWidth, overflow:[...document.querySelectorAll("body *")].filter(element => { const box=element.getBoundingClientRect(); return box.width && box.right>innerWidth+1; }).slice(0,12).map(element => ({tag:element.tagName,class:element.className,text:element.textContent.slice(0,80),width:element.getBoundingClientRect().width})) }))));
   }
   // Storage preference survives a URL without a language parameter.
   const url = new URL(page.url()); url.searchParams.delete("lang");

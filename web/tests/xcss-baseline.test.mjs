@@ -35,9 +35,15 @@ for (const snapshot of ["content-blocks.css", "provenance.json", "verify.mjs"]) 
   assert.equal(existsSync(new URL(`../appearance/${snapshot}`, import.meta.url)), false, "xcss CSS must not be copied into the product");
 }
 
-const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const main = readFileSync(new URL("../src/main-leptos.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-assert.match(main, /createXcssAdminApplication/);
+assert.match(main, /pkg\/xszs_web\.js/);
+assert.match(main, /xszs_web_bg\.wasm\?url/);
+const rust = readFileSync(new URL("../leptos/src/lib.rs", import.meta.url), "utf8");
+assert.match(rust, /AdminShell product="xszs"/);
+for (const name of ["react", "react-dom", "@vitejs/plugin-react"]) {
+  assert.equal(manifest.dependencies?.[name] ?? manifest.devDependencies?.[name], undefined, "The production toolchain must use the Rust UI");
+}
 assert.doesNotMatch(main, /AdministratorsPanel|平台管理员|Platform administrators/);
 assert.doesNotMatch(main, /useAdministratorSession|function Login|localStorage|sessionStorage|error\.message/);
 assert.doesNotMatch(styles, /@font-face|font-family|--xcss-[a-z-]+\s*:|\.toast|\.sidebar/);

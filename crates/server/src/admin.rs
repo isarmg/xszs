@@ -930,7 +930,7 @@ pub(crate) async fn web_page(State(state): State<AppState>, request: Request) ->
 
 fn secure_page(response: &mut Response) {
     response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'self'; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     ));
 }
 
@@ -1064,15 +1064,24 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_fonts_and_license_are_the_verified_release_bytes() {
+        crate::web_assets::verify().unwrap();
+        assert!(
+            crate::web_assets::ASSETS
+                .iter()
+                .any(|asset| asset.path.ends_with(".wasm")),
+            "Leptos browser WASM must be embedded"
+        );
         for asset in crate::web_assets::ASSETS {
             let path = asset.path;
             let bytes = asset.bytes;
-            if !path.ends_with(".woff2") && !path.ends_with(".txt") {
+            if !path.ends_with(".woff2") && !path.ends_with(".txt") && !path.ends_with(".wasm") {
                 continue;
             }
             let response = crate::web_assets::response(path, &Method::GET, &HeaderMap::new());
             let content_type = if path.ends_with(".woff2") {
                 "font/woff2"
+            } else if path.ends_with(".wasm") {
+                "application/wasm"
             } else {
                 "text/plain; charset=utf-8"
             };
@@ -1095,6 +1104,8 @@ mod tests {
             assert_eq!(body.as_ref(), bytes);
             if path.ends_with(".woff2") {
                 assert!(bytes.starts_with(b"wOF2"));
+            } else if path.ends_with(".wasm") {
+                assert!(bytes.starts_with(b"\0asm"));
             } else {
                 assert!(
                     std::str::from_utf8(bytes)
@@ -1141,14 +1152,14 @@ mod tests {
         let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
             .to_str()
             .unwrap();
-        // The corner renderer uses generated SVG Blob images. Restrict that
-        // addition to img-src; all other page sources stay unchanged.
+        // Keep JavaScript evaluation and inline styles disabled while allowing
+        // the Leptos WASM module and generated corner SVG Blob images.
         assert_eq!(
             policy.split(';').map(str::trim).collect::<Vec<_>>(),
             [
                 "default-src 'self'",
                 "style-src 'self'",
-                "script-src 'self'",
+                "script-src 'self' 'wasm-unsafe-eval'",
                 "connect-src 'self'",
                 "img-src 'self' data: blob:",
                 "font-src 'self'",
@@ -1159,7 +1170,11 @@ mod tests {
             ]
         );
         assert!(!policy.contains("unsafe-inline"));
-        assert!(!policy.contains("unsafe-eval"));
+        assert!(
+            !policy
+                .split_whitespace()
+                .any(|token| token.trim_end_matches(';') == "'unsafe-eval'")
+        );
         assert_eq!(
             response.headers()[header::X_CONTENT_TYPE_OPTIONS],
             "nosniff"

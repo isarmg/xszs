@@ -15,3 +15,5 @@ Installation, upgrades and offline account maintenance are supplied by the separ
 The server manages application authentication, verified instance and file quotas, and bounded resource use. It does not identify client IP addresses or configure any reverse proxy.
 
 See the [documentation](docs/README.md).
+
+前端使用 Leptos CSR + Rust/WASM，后端继续使用 Axum。构建、验收和迁移边界见 [Leptos 界面维护说明](docs/leptos-web.md)。

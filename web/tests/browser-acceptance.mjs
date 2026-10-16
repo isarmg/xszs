@@ -188,7 +188,10 @@ try {
         throw new Error(`Unexpected API request ${method} ${path}`);
       });
 
+      const wasmReady = page.waitForResponse(response => new URL(response.url()).pathname.endsWith(".wasm") && response.status() === 200);
       await page.goto(`http://127.0.0.1:${address.port}/admin/`);
+      await wasmReady;
+      await expect(page.locator("html")).toHaveAttribute("data-xcss-runtime", "leptos", { timeout: 30_000 });
       await expect(page.getByRole("button", { name: "实例列表", exact: true })).toHaveAttribute("aria-pressed", "true");
       const statistics = page.getByRole("table", { name: "实例统计" });
       await expect(page.locator("h2").filter({ hasText: /^(实例|实例列表|统计)$/ })).toHaveCount(0);

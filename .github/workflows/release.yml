@@ -16,7 +16,7 @@ jobs:
   validate:
     name: Validate release
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -35,6 +35,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: npm ci --prefix web
+      - name: Install pinned browser Rust tools
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          cargo +1.99.0 install wasm-bindgen-cli --version 0.2.129 --locked
       - run: web/node_modules/.bin/xcss-build-server --config "$PWD/xcss-web-build.json" --mode development --web-only --no-install
       - run: ./scripts/verify-release-version.sh "$RELEASE_TAG"
       - run: ./scripts/check-workflow-supply-chain.sh
@@ -47,7 +51,7 @@ jobs:
     name: Linux server
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -67,11 +71,17 @@ jobs:
         with:
           key: release-server
       - run: npm ci --prefix web
+      - name: Install pinned browser Rust tools
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          cargo +1.99.0 install wasm-bindgen-cli --version 0.2.129 --locked
       - run: web/node_modules/.bin/xcss-build-server --config "$PWD/xcss-web-build.json" --mode development --web-only --no-install
       - name: Install pinned package audit and SBOM tools
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
           cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Audit locked browser Rust dependencies
+        run: cargo audit --file web/leptos/Cargo.lock --deny yanked
       - name: Build and verify the signed server package
         run: |
           mkdir -p "$RUNNER_TEMP/release-output"
