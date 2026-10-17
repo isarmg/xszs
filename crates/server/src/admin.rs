@@ -939,6 +939,31 @@ mod tests {
     use super::*;
     use axum::http::{HeaderMap, Method};
 
+    fn embedded_stylesheet() -> (&'static str, &'static str) {
+        let index = crate::web_assets::ASSETS
+            .iter()
+            .find(|asset| asset.path == "index.html")
+            .expect("embedded administrator index");
+        let html = std::str::from_utf8(index.bytes).unwrap();
+        let stylesheet = html
+            .split("<link")
+            .find(|link| link.contains("rel=\"stylesheet\""))
+            .expect("administrator stylesheet link");
+        let url = stylesheet
+            .split("href=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let path = url.strip_prefix("/admin/").expect("same-origin admin URL");
+        let asset = crate::web_assets::ASSETS
+            .iter()
+            .find(|asset| asset.path == path)
+            .expect("stylesheet referenced by the actual index is embedded");
+        (asset.path, std::str::from_utf8(asset.bytes).unwrap())
+    }
+
     #[test]
     fn log_dates_are_strict_gregorian_calendar_dates() {
         for date in ["2024-02-29", "2026-09-23", "2000-02-29"] {
@@ -1065,6 +1090,37 @@ mod tests {
     #[tokio::test]
     async fn embedded_fonts_and_license_are_the_verified_release_bytes() {
         crate::web_assets::verify().unwrap();
+        let index = crate::web_assets::ASSETS
+            .iter()
+            .find(|asset| asset.path == "index.html")
+            .unwrap();
+        let html = std::str::from_utf8(index.bytes).unwrap();
+        let font_paths = html
+            .split("href=\"")
+            .skip(1)
+            .filter_map(|attribute| attribute.split('"').next())
+            .filter(|url| url.ends_with(".woff2"))
+            .map(|url| url.strip_prefix("/admin/").expect("same-origin font URL"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(font_paths.len(), 2, "regular and bold fonts are preloaded");
+        let (_, css) = embedded_stylesheet();
+        let css_font_paths = css
+            .split("url(")
+            .skip(1)
+            .filter_map(|value| value.split(')').next())
+            .map(|url| url.trim().trim_matches(['\'', '"']))
+            .filter(|url| url.ends_with(".woff2"))
+            .map(|url| url.strip_prefix("/admin/").expect("same-origin font URL"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(css_font_paths, font_paths);
+        for path in &font_paths {
+            assert!(
+                crate::web_assets::ASSETS
+                    .iter()
+                    .any(|asset| asset.path == *path),
+                "font referenced by the actual index and CSS must be embedded: {path}"
+            );
+        }
         assert!(
             crate::web_assets::ASSETS
                 .iter()
@@ -1098,20 +1154,41 @@ mod tests {
                 response.headers()[header::X_CONTENT_TYPE_OPTIONS],
                 "nosniff"
             );
+            let expected_headers = response.headers().clone();
             let body = axum::body::to_bytes(response.into_body(), bytes.len())
                 .await
                 .unwrap();
             assert_eq!(body.as_ref(), bytes);
+            let head = crate::web_assets::response(path, &Method::HEAD, &HeaderMap::new());
+            assert_eq!(head.status(), StatusCode::OK);
+            assert_eq!(head.headers(), &expected_headers);
+            assert!(
+                axum::body::to_bytes(head.into_body(), 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             if path.ends_with(".woff2") {
+                assert!(font_paths.contains(path));
                 assert!(bytes.starts_with(b"wOF2"));
             } else if path.ends_with(".wasm") {
                 assert!(bytes.starts_with(b"\0asm"));
             } else {
-                assert!(
-                    std::str::from_utf8(bytes)
-                        .unwrap()
-                        .contains("SIL OPEN FONT LICENSE")
-                );
+                let license = std::str::from_utf8(bytes).unwrap();
+                match path.rsplit('/').next().unwrap() {
+                    "OFL.txt" | "NORMAL-LICENSE.txt" | "CJK-LICENSE.txt" => {
+                        assert!(license.contains("SIL OPEN FONT LICENSE"));
+                    }
+                    "LICENSE-leptos-MIT.txt" | "LICENSE-leptos-macro-MIT.txt" => {
+                        assert!(license.contains("MIT License"));
+                        assert!(license.contains("Permission is hereby granted, free of charge"));
+                    }
+                    "LICENSE-xcss-Apache-2.0.txt" => {
+                        assert!(license.contains("Apache License"));
+                        assert!(license.contains("Version 2.0, January 2004"));
+                    }
+                    _ => panic!("unreviewed embedded license: {path}"),
+                }
             }
         }
         for name in ["../index.html", "missing.woff2", "MapleMono.woff2"] {
@@ -1129,19 +1206,52 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_assets_revalidate_without_retransmitting_the_body() {
-        let initial =
-            crate::web_assets::response("assets/admin.css", &Method::GET, &HeaderMap::new());
+        let (path, css) = embedded_stylesheet();
+        let initial = crate::web_assets::response(path, &Method::GET, &HeaderMap::new());
+        assert_eq!(initial.status(), StatusCode::OK);
+        assert_eq!(
+            initial.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(initial.headers()[header::CACHE_CONTROL], "public, no-cache");
+        assert_eq!(initial.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(
+            initial.headers()[header::CONTENT_LENGTH].to_str().unwrap(),
+            css.len().to_string()
+        );
         let etag = initial.headers()[header::ETAG].clone();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::IF_NONE_MATCH, etag);
-        let cached = crate::web_assets::response("assets/admin.css", &Method::GET, &headers);
-        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        let expected_headers = initial.headers().clone();
+        assert_eq!(
+            axum::body::to_bytes(initial.into_body(), css.len())
+                .await
+                .unwrap()
+                .as_ref(),
+            css.as_bytes()
+        );
+        let head = crate::web_assets::response(path, &Method::HEAD, &HeaderMap::new());
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers(), &expected_headers);
         assert!(
-            axum::body::to_bytes(cached.into_body(), 1)
+            axum::body::to_bytes(head.into_body(), 0)
                 .await
                 .unwrap()
                 .is_empty()
         );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.clone());
+        for method in [Method::GET, Method::HEAD] {
+            let cached = crate::web_assets::response(path, &method, &headers);
+            assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(cached.headers()[header::ETAG], etag);
+            assert_eq!(cached.headers()[header::CACHE_CONTROL], "public, no-cache");
+            assert_eq!(cached.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert!(
+                axum::body::to_bytes(cached.into_body(), 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]
