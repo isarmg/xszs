@@ -1,4 +1,5 @@
 // Bootstrap only. Application state, networking and views live in web/leptos.
+import "@xcss/web/web-fonts/boot.css";
 import "@xcss/web/design-tokens/tokens.css";
 import "@xcss/web/design-tokens/tokens.dark.css";
 import "@xcss/web/design-tokens/reset.css";

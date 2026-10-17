@@ -1,5 +1,7 @@
 # Leptos 管理界面
 
+当前构建入口已更新为 [Rust 原生 Web 构建与测试](rust-native-web.md)。以下保留首次 Leptos 迁移时的流程与验证记录。
+
 管理界面使用 Leptos CSR：Rust 编译到浏览器 WASM，Axum 继续提供用户、实例、配额、客户端凭据、日志、账户管理及静态资源接口。服务端接口及数据库格式不因前端迁移改变。
 
 分支约定：`main` 保留 React 实现，本文所述 Leptos CSR 实现在 `feat/leptos-migration`。构建与验收需先切换到该分支；合并、发行和线上部署按后续明确安排执行。

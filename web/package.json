@@ -7,25 +7,24 @@
     "node": ">=26.7.0 <27"
   },
   "scripts": {
-    "dev": "python3 ../scripts/build-leptos.py build --debug && vite --host 0.0.0.0",
-    "typecheck": "npm run check:leptos",
+    "dev": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- serve --product-root .. --debug --bind 127.0.0.1:5173",
+    "typecheck": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- check --product-root ..",
     "test:unit": "npm run test:leptos",
     "check:xcss": "node tests/xcss-baseline.test.mjs",
-    "build": "npm run check:xcss && python3 ../scripts/build-leptos.py build && vite build",
+    "build": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- build --product-root ..",
     "test:browser": "npm run build && node tests/browser-acceptance.mjs",
-    "build:server": "xcss-build-server --config ../xcss-web-build.json --mode development",
-    "build:leptos": "npm run build",
-    "check:leptos": "python3 ../scripts/build-leptos.py check",
-    "test:leptos": "python3 ../scripts/build-leptos.py test",
-    "test:browser:leptos": "npm run test:browser"
-  },
-  "dependencies": {
-    "@xcss/web": "https://github.com/isarmg/xcss/releases/download/v1.0.0/xcss-web-1.0.0.tgz"
+    "build:server": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- server --product-root .. --config xcss-web-build.json --mode development",
+    "build:leptos": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- build --product-root ..",
+    "check:leptos": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- check --product-root ..",
+    "test:leptos": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- test --product-root ..",
+    "test:browser:leptos": "npm run test:browser",
+    "preview": "cargo +1.99.0 run --quiet --locked --manifest-path ../tools/web-build/Cargo.toml -- preview --product-root .. --bind 127.0.0.1:4173"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
     "@playwright/test": "1.63.0",
     "@types/node": "26.6.4",
+    "@xcss/web": "https://github.com/isarmg/xcss/releases/download/v1.0.0/xcss-web-1.0.0.tgz",
     "vite": "8.3.3"
   }
 }
