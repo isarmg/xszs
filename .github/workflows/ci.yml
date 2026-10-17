@@ -66,7 +66,7 @@ jobs:
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
           cargo +1.99.0 install wasm-bindgen-cli --version 0.2.129 --locked
-      - run: cargo +1.99.0 run --quiet --locked --manifest-path tools/web-build/Cargo.toml -- server --product-root . --config "$PWD/xcss-web-build.json" --mode development --web-only
+      - run: cargo +1.99.0 run --quiet --locked --manifest-path tools/web-build/Cargo.toml -- server --product-root . --config xcss-web-build.json --mode development --web-only
       - name: Validate browser Rust source and contracts
         run: |
           cargo +1.99.0 fmt --manifest-path tools/web-build/Cargo.toml -- --check
