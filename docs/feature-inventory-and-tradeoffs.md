@@ -49,7 +49,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-P-006 | Server 配置位于 `config/`、部署资产位于 `deploy/`；移动客户端只存在于独立 Client 仓库 | 仓库目录 | 开发运维 | 低 | 跨仓库路径和构建命令易被混用 | README、CI 和脚本只引用实际存在的目录 |
 | MED-P-007 | React/Vite 管理 Web 位于 `web/`，随 Server 构建和交付 | 目录结构、workspace scripts | 开发运维 | 低 | 客户端代码位置不一致，维护人员难以识别边界 | README、CI、构建脚本使用统一路径 |
 | MED-P-008 | 原始媒体在 Server 使用 `plain-v1` 明文字节，传输机密性依赖 HTTPS | `StorageEncoding::PlainV1`、Client `crates/crypto` | 核心 | 高 | 改成端到端密文会重写缩略图、恢复、去重和密钥生命周期 | byte-for-byte round trip；HTTP 明文直连不得公网暴露 |
-| MED-P-009 | Server Rust 和一个 @xcss/web 包固定 xcss 1.0.0 的完整 Git revision、Release URL 与 lock integrity，无相邻工作区来源 | Cargo、一个 `@xcss/web` 依赖、manifest/lock | 保障 | 高 | 平台行为随未固定依赖漂移 | locked 独立构建、xcss revision test 与 Web 门禁 |
+| MED-P-009 | Server Rust 固定 xcss Git revision，Web 快照固定已发布来源、包 integrity 与逐文件 SHA-256，无相邻工作区来源 | Cargo、`web/vendor/xcss/SOURCE.json`、Rust 构建器 | 保障 | 高 | 平台行为随未固定依赖漂移 | locked 独立构建、xcss revision test 与 Web 门禁 |
 
 ## 3. 身份、认证与请求边界
 
@@ -134,7 +134,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
-| MED-W-001 | xcss Shell 统一 restore/login/logout、导航、通知与诊断，Session/CSRF 只在内存；产品没有第二套登录状态机 | `createXcssAdminApplication`、`@xcss/web/admin-shell` | 保障 | 高 | 认证竞态或 Secret 持久化 | 共享 Shell 测试、消费者 Chromium/Firefox 验收 |
+| MED-W-001 | xcss Shell 统一 restore/login/logout、导航、通知与诊断，Session/CSRF 只在内存；产品没有第二套登录状态机 | `web/xcss-web/src`、公共 Rust `AdminShell` | 保障 | 高 | 认证竞态或 Secret 持久化 | 共享 Shell 测试、消费者 Chromium/Firefox 验收 |
 | MED-W-002 | 统一完整有序实例列表、详细信息和日志视图；实例列表按 NOCASE/原名/UUID 排序并以每页 50 条正反 keyset 遍历，全局统计来自 SQL 聚合，详情独立按 ID 读取；日志默认显示 UTC 当天，按 UTC 日历日期范围（包含起止当天）和实例筛选；年月日数字直接编辑、回车应用，前后端拒绝非法日期和倒置范围，以每页 50 条正反游标遍历全部审计记录；管理员账号仅由 xcss Shell 右上角人物图标设置；业务读取失败清除旧数据，安全错误显示 Request ID 和显式重试 | `Application`、`OverviewView`、`UserDetailsView`、`LogsView` | 建议保留 | 中 | 身份域混淆或失败后仍显示过期状态 | 125 同名实例三页、全局统计、独立详情、创建/删除后复核、超过 200 条同时间日志完整翻页、坏游标、实例过滤与日期边界、失败/重试、账号设置、无内部错误泄漏 |
 | MED-W-003 | 总览聚合 total instance、used/pending/quota 和每实例资源数；在线数由实例列表统一计算 | `/api/v1/admin/overview`、Overview guard | 建议保留 | 中 | 容量和实例状态只能手工查询 | unlimited quota、large safe integer、空库 |
 | MED-W-004 | 新建按钮直接创建永久启用的默认名称实例，原子创建自动存储、默认配额和客户端授权码；详情以实例名称、只读实例 ID 和实例授权码展示配对信息；授权码可查看和轮换，实例可取消并在终态删除整个空实例；GiB 配额在详情页编辑并换算为整数字节 | `Application`、`BackupUserForm`、`InstanceManager` | 核心 | 高 | 首次配对重新暴露基础设施参数、部分成功留下孤立归属或授权未真正撤销 | direct default create、默认值、实例配对/轮换/删除、精确 quota |
@@ -143,7 +143,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-W-007 | xcss tokens/reset/accessibility 提供 focus、reduced motion、forced colors 基线 | CSS imports、`data-xcss-scope` | 保障 | 中 | 基础行为跨项目漂移 | keyboard、focus、high contrast、CSS digest |
 | MED-W-008 | 业务 CSS 仅保留 `.media-*` 布局，导航/表单/弹窗/通知来自共享 UI，字体使用 Maple 同源资产 | `web/src/styles.css`、xcss CSS imports | 建议保留 | 中 | 重复平台样式重新分叉 | 禁止私有字体/token、窄屏、长文本、progress |
 | MED-W-009 | 精确 Node 26.7.0、React/DOM 19.3.0、TS 7.0.2、Vite 8.3.3 | `.node-version`、package/lock | 开发运维 | 中 | 开发、CI 与发行 bundle 不可复现 | engine、`npm ci`、typecheck、版本断言 |
-| MED-W-010 | `build` 强制 check:xcss→typecheck→xcss Vite 配置，512 KiB 单资产硬预算且禁止 source map；完整 dist 资产包含字体与许可 | package scripts、vite config | 开发运维 | 高 | 二进制、字体和发行 manifest 混代 | 构建门禁、实际 dist 浏览器测试 |
+| MED-W-010 | Rust build 执行来源、许可证和资源预算门禁，普通资产上限 512 KiB、WASM 上限 4 MiB；完整 dist 包含字体与许可 | `tools/web-build`、`web/rust-web.toml` | 开发运维 | 高 | 二进制、字体和发行 manifest 混代 | 构建门禁、实际 dist 浏览器测试 |
 | MED-W-011 | xcss 自动生成内嵌清单绑定 HTML/JS/CSS/WOFF2/许可证；发行只附清单，HTTP 与校验共用 binary 字节，保留 CSP 和 nosniff | `web_assets.rs`、`admin.rs`、XSSI `package.py` | 保障 | 高 | 字体 404、缺少许可证或发布内容漂移 | 全清单实际 HTTP 字节/类型、HEAD/ETag、篡改/重写清单拒绝 |
 
 ## 8. SQLite、运行锁、离线检查、发布与供应链

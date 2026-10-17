@@ -27,3 +27,5 @@ CI 与正式打包脚本的生产 build/server 直接调用 Cargo，保留原 so
 当前 `web/xcss-web/src` 的界面使用普通 Rust builder、元组、迭代器和闭包组合，已移除 authored `view!`。`#[component]` 仅处理 xcss-web 组件参数与生命周期；DOM 构造直接调用原有 xcss-web API，没有添加新的模板语法。Rustfmt、WASM 类型检查、Clippy 与原浏览器断言继续适用。
 
 一次性视图迁移已经完成，对应转换器及独立锁文件已退役，历史实现可通过 xcss 的 Git 历史查阅。组件适配块保留了 codegen 对 let-and-return、unit props 的局部 lint 边界；业务逻辑没有全文件 lint 豁免。后续维护可直接编辑普通 Rust 视图，再执行相同构建与浏览器验收。
+
+公共 CSS、字体及 DOM 适配器使用 `web/vendor/xcss` 的审计快照；`@xcss/web/` 是 Rust 构建器别名，不是 npm 运行时依赖。`SOURCE.json` 保留已发布 v1.0.0 包的来源、完整性摘要与逐文件 SHA-256。更新公共资源须重新导出和验证快照；不能仅升级 npm 包或指向尚未发布的资源。`npm run check:xcss --prefix web` 校验实际快照与当前入口，CI 保留该门禁。

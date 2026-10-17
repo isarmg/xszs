@@ -1,25 +1,24 @@
 # xcss-web 管理界面
 
-当前入口为 `web/xcss-web`，仅通过 `xcss-web` 路径 crate 接入；主分支使用 Rust 生产构建。构建与验收命令见 [Rust 原生 Web 构建与测试](rust-native-web.md)。本文保留首次迁移时的流程和测量记录，旧 Node/Vite 命令与体积数字不代表本次改名后的验证结果。
+当前入口为 `web/xcss-web`，仅通过 `xcss-web` 路径 crate 接入；主分支使用 Rust 生产构建。构建与验收命令见 [Rust 原生 Web 构建与测试](rust-native-web.md)。以下命令对应当前 Rust 原生构建。
 
 管理界面使用 xcss-web CSR：Rust 编译到浏览器 WASM，Axum 继续提供用户、实例、配额、客户端凭据、日志、账户管理及静态资源接口。服务端接口及数据库格式不因前端迁移改变。
 
-当前 `main` 已合并 xcss-web CSR 与 Rust 原生构建；直接在主分支构建和验收。下面的首次迁移流程与数字作为历史记录，正式发行和线上部署继续使用产品发布流程。
+当前 `main` 已合并 xcss-web CSR 与 Rust 原生构建；直接在主分支构建和验收。正式发行和线上部署继续使用产品发布流程。
 
 `web/xcss-web/src` 是界面、状态和请求校验的实现；`web/src/main-xcss-web.js` 负责加载字体、CSS、角标绘制适配器和 WASM。退役的 React 对照源码、模拟测试和独立配置已从工作树移除，历史差异可通过 Git 查阅；当前 Rust 单元测试和真实 WASM 浏览器验收继续保留。
 
 ## 构建
 
-需要 Node 26.7.0、Python 3.11 或更新版本，以及固定 Rust/WASM 工具：
+生产构建仅需要固定 Rust/WASM 工具；Node 26.7.0 仅用于浏览器验收：
 
 ```sh
 rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
 cargo +1.99.0 install wasm-bindgen-cli --version 0.2.129 --locked
-npm ci --prefix web
-npm run build --prefix web
+cargo +1.99.0 run --locked --manifest-path tools/web-build/Cargo.toml -- build --product-root .
 ```
 
-默认构建生成优化 WASM，先在临时目录生成绑定，再更新 `web/pkg`。Vite 输出到 `web/dist`；现有 `xcss-build-server` 和 Axum 嵌入资源流程继续使用这个目录。`CARGO_TARGET_DIR` 和 `WASM_BINDGEN` 可以显式指定缓存目录和固定版本工具路径。
+默认构建生成优化 WASM，先在临时目录生成绑定，再更新 `web/pkg`。Rust 构建器输出到 `web/dist`；Axum 嵌入资源流程继续使用这个目录。`CARGO_TARGET_DIR` 和 `WASM_BINDGEN` 可以显式指定缓存目录和固定版本工具路径。
 
 每份构建包含 `assets/xcss-web-build.json`，记录 Rust 输入、锁文件、公共组件输入、构建工具及生成文件的 SHA-256。编译期间输入变化会中止构建。WASM 上限 4 MiB，普通资产上限 512 KiB，完整资产上限 16 MiB；字体保留原许可证。
 
@@ -29,6 +28,9 @@ npm run build --prefix web
 cargo +1.99.0 run --locked --manifest-path tools/web-build/Cargo.toml -- check --product-root .
 cargo +1.99.0 run --locked --manifest-path tools/web-build/Cargo.toml -- test --product-root .
 cargo +1.99.0 test --locked --manifest-path tools/web-build/Cargo.toml
+npm ci --prefix web
+npm run check:xcss --prefix web
+npx --prefix web playwright install chromium firefox
 npm run test:browser --prefix web
 ```
 
