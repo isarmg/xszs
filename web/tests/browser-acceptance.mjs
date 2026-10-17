@@ -403,7 +403,9 @@ try {
         username:`bulk-${index}`,display_name:"同名实例",used_bytes:1,pending_bytes:0,quota_bytes:1073741824,
         instances:[instance({id:`018f1f4b-7a5d-7b5f-8d31-${String(index+200000000000).padStart(12,"0")}`,name:"同名实例",status:"paired",online:index%2===0})],
       }));
-      await page.goto(`http://127.0.0.1:${address.port}/admin/#instances`);
+      // The preceding deletion already returned to #instances with an empty list.
+      // Reload explicitly to start this independent fixture with fresh reads.
+      await page.reload();
       const rows = instanceTable.locator("tbody tr"), navigation = page.getByRole("navigation",{name:"实例分页",exact:true});
       const visited = [];
       for(let index=0;index<3;index++) {
