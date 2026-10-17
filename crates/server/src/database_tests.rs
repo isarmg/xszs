@@ -755,12 +755,16 @@ async fn v02_wire_is_strict_across_the_real_sqlite_file_flow_and_restart() {
         StatusCode::CONFLICT,
     )
     .await;
-    for expected_accounts in [2_i64, 1_i64] {
+    for (method, suffix, expected_accounts) in [
+        (Method::POST, "/revoke", 2_i64),
+        (Method::POST, "/revoke", 2_i64),
+        (Method::DELETE, "", 1_i64),
+    ] {
         send(
             &app,
             json_request(
-                Method::DELETE,
-                format!("/api/v1/admin/instances/{disposable_id}"),
+                method,
+                format!("/api/v1/admin/instances/{disposable_id}{suffix}"),
                 json!({}),
                 None,
                 Some((&admin_cookie, &admin_csrf)),
@@ -1462,7 +1466,7 @@ async fn rotating_or_revoking_an_instance_invalidates_its_api_keys() {
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
     }
 
-    admin::remove_instance(
+    admin::revoke_instance(
         axum::extract::State(state.clone()),
         xcss::server_cli::ContractPath(device_id),
     )

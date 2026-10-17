@@ -634,7 +634,7 @@ pub(crate) async fn rotate_instance_authorization(
     load_instance(&state, id).await
 }
 
-pub(crate) async fn remove_instance(
+pub(crate) async fn revoke_instance(
     State(state): State<AppState>,
     ContractPath(id): ContractPath<Uuid>,
 ) -> Result<StatusCode, AppError> {
@@ -648,61 +648,82 @@ pub(crate) async fn remove_instance(
         return Err(AppError::not_found("instance not found"));
     };
     if status == "cancelled" || status == "revoked" {
-        let references: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM assets WHERE device_id=?) + (SELECT COUNT(*) FROM uploads WHERE device_id=?) + (SELECT COUNT(*) FROM albums WHERE device_id=?) + (SELECT COUNT(*) FROM api_keys WHERE device_id=? AND revoked_at IS NULL)")
-            .bind(id).bind(id).bind(id).bind(id).fetch_one(&mut *transaction).await?;
-        if references != 0 {
-            return Err(AppError::conflict("instance still owns backup records"));
-        }
-        // Blob rows are the durable retry queue for failed physical deletion.
-        // Cascading them away would strand their files outside reconciliation.
-        let pending_blobs: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE account_id = ?)")
-                .bind(account_id)
-                .fetch_one(&mut *transaction)
-                .await?;
-        if pending_blobs {
-            return Err(AppError::conflict(
-                "instance still has blobs awaiting reclamation",
-            ));
-        }
-        write_instance_audit(&mut transaction, account_id, id, "device.instance.delete").await?;
-        sqlx::query("DELETE FROM accounts WHERE id=?")
-            .bind(account_id)
-            .execute(&mut *transaction)
-            .await?;
-    } else {
-        sqlx::query("UPDATE devices SET token_hash=NULL,pairing_status=? WHERE id=?")
-            .bind(if status == "pending" {
-                "cancelled"
-            } else {
-                "revoked"
-            })
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("UPDATE api_keys SET revoked_at = datetime('now') WHERE device_id = ? AND revoked_at IS NULL")
-            .bind(id).execute(&mut *transaction).await?;
-        write_instance_audit(
-            &mut transaction,
-            account_id,
-            id,
-            if status == "pending" {
-                "device.pairing.cancel"
-            } else {
-                "device.instance.revoke"
-            },
-        )
-        .await?;
+        return Ok(StatusCode::NO_CONTENT);
     }
+    sqlx::query("UPDATE devices SET token_hash=NULL,pairing_status=? WHERE id=?")
+        .bind(if status == "pending" {
+            "cancelled"
+        } else {
+            "revoked"
+        })
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE api_keys SET revoked_at = datetime('now') WHERE device_id = ? AND revoked_at IS NULL")
+        .bind(id).execute(&mut *transaction).await?;
+    write_instance_audit(
+        &mut transaction,
+        account_id,
+        id,
+        if status == "pending" {
+            "device.pairing.cancel"
+        } else {
+            "device.instance.revoke"
+        },
+    )
+    .await?;
     transaction.commit().await?;
-    let event = if status == "cancelled" || status == "revoked" {
-        "xszs.instance.deleted"
-    } else if status == "pending" {
+    let event = if status == "pending" {
         "xszs.instance.pairing_cancelled"
     } else {
         "xszs.instance.revoked"
     };
     tracing::info!(event, instance_id = %id, instance_type = "device");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn remove_instance(
+    State(state): State<AppState>,
+    ContractPath(id): ContractPath<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let mut transaction = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT account_id,pairing_status FROM devices WHERE id=?")
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let Some((account_id, status)) = row else {
+        return Err(AppError::not_found("instance not found"));
+    };
+    if status != "cancelled" && status != "revoked" {
+        return Err(AppError::conflict(
+            "cancel or revoke the instance before deleting it",
+        ));
+    }
+    let references: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM assets WHERE device_id=?) + (SELECT COUNT(*) FROM uploads WHERE device_id=?) + (SELECT COUNT(*) FROM albums WHERE device_id=?) + (SELECT COUNT(*) FROM api_keys WHERE device_id=? AND revoked_at IS NULL)")
+        .bind(id).bind(id).bind(id).bind(id).fetch_one(&mut *transaction).await?;
+    if references != 0 {
+        return Err(AppError::conflict("instance still owns backup records"));
+    }
+    // Blob rows are the durable retry queue for failed physical deletion.
+    // Cascading them away would strand their files outside reconciliation.
+    let pending_blobs: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE account_id = ?)")
+            .bind(account_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if pending_blobs {
+        return Err(AppError::conflict(
+            "instance still has blobs awaiting reclamation",
+        ));
+    }
+    write_instance_audit(&mut transaction, account_id, id, "device.instance.delete").await?;
+    sqlx::query("DELETE FROM accounts WHERE id=?")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    tracing::info!(event = "xszs.instance.deleted", instance_id = %id, instance_type = "device");
     Ok(StatusCode::NO_CONTENT)
 }
 

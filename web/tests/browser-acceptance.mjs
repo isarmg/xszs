@@ -78,6 +78,7 @@ try {
       const expectedQuotaUpdates = [123456789, 107374182];
       let holdQuotaResponse = false, releaseQuotaResponse;
       let holdRotate = false, releaseRotate;
+      let loseRevokeResponse = false;
       page.on("pageerror", error => errors.push(error.message));
       await page.route("**/api/v1/**", async route => {
         const request = route.request(), path = new URL(request.url()).pathname, method = request.method();
@@ -170,6 +171,17 @@ try {
           Object.assign(target, { authorization_code: "r".repeat(36), status: "pending" });
           return route.fulfill({ json: target });
         }
+        const revokeMatch = path.match(/^\/api\/v1\/admin\/instances\/([^/]+)\/revoke$/);
+        if (revokeMatch && method === "POST") {
+          const target = users.flatMap(user => user.instances).find(item => item.id === revokeMatch[1]);
+          assert.ok(target);
+          if (target.status !== "cancelled" && target.status !== "revoked") {
+            target.status = target.status === "pending" ? "cancelled" : "revoked";
+            target.online = false;
+          }
+          if (loseRevokeResponse) { loseRevokeResponse = false; return route.abort("failed"); }
+          return route.fulfill({ status: 204 });
+        }
         const removeMatch = path.match(/^\/api\/v1\/admin\/instances\/([^/]+)$/);
         if (removeMatch && method === "DELETE") {
           const target = users.flatMap(user => user.instances).find(item => item.id === removeMatch[1]);
@@ -181,7 +193,7 @@ try {
             const current = user.instances.find(item => item.id === removeMatch[1]);
             if (!current) continue;
             if (current.status === "cancelled" || current.status === "revoked") users.splice(userIndex, 1);
-            else { current.status = current.status === "pending" ? "cancelled" : "revoked"; current.online=false; }
+            else return route.fulfill({ status: 409, json: { code: "conflict", message: "Revoke before deleting", retryable: false } });
           }
           return route.fulfill({ status: 204 });
         }
@@ -210,7 +222,7 @@ try {
       const instanceNameStyle = await instanceTable.getByRole("link", { name: "验收备份账户" }).evaluate(element => ({ color: getComputedStyle(element).color, parentColor: getComputedStyle(element.parentElement).color, decoration: getComputedStyle(element).textDecorationLine }));
       assert.equal(instanceNameStyle.color, instanceNameStyle.parentColor);
       assert.equal(instanceNameStyle.decoration, "none");
-      await expect(instanceTable.getByRole("columnheader")).toHaveText(["实例", "配对状态", "在线状态", "操作系统/架构", "最后在线", "已用容量 / 配额", "删除"]);
+      await expect(instanceTable.getByRole("columnheader")).toHaveText(["实例", "配对状态", "在线状态", "操作系统/架构", "最后在线", "已用容量 / 配额", "操作"]);
       await expect(instanceTable).not.toContainText(instanceId);
       await expect(instanceTable).not.toContainText(code);
       assert.ok((await instanceTable.locator("th, td").evaluateAll(elements => elements.map(element => getComputedStyle(element).textAlign))).every(value => value === "left"));
@@ -228,9 +240,9 @@ try {
       await expect(page.getByRole("button", { name: "关闭通知", exact: true })).toHaveCount(0, { timeout: 7_000 });
       await expect(page.getByRole("link", { name: "新实例", exact: true })).toBeVisible();
       const createdRow = instanceTable.locator("tbody tr").filter({ has: page.getByRole("link", { name: "新实例", exact: true }) });
-      await createdRow.getByRole("button", { name: "删除", exact: true }).click();
+      await createdRow.getByRole("button", { name: "取消或撤销", exact: true }).click();
       await createdRow.getByRole("button", { name: "取消", exact: true }).click();
-      await expect(createdRow.getByRole("button", { name: "确认删除", exact: true })).toHaveCount(0);
+      await expect(createdRow.getByRole("button", { name: "确认取消或撤销", exact: true })).toHaveCount(0);
 
       await page.getByRole("link", { name: "验收备份账户", exact: true }).click();
       await expect(page.getByRole("button", { name: "详细信息", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -293,8 +305,17 @@ try {
       releaseRotate();
       await expect(page.getByText("r".repeat(36), { exact: true })).toBeVisible();
       assert.equal(rotationCount(), 2);
+      loseRevokeResponse = true;
+      const revokeCount = () => mutations.filter(item => item.path.endsWith("/revoke")).length;
       await page.getByRole("button", { name: "取消配对", exact: true }).click();
-      await page.getByRole("button", { name: "确认", exact: true }).click();
+      const revokeDialog = page.getByRole("dialog", { name: "取消或撤销实例", exact: true });
+      await revokeDialog.getByRole("button", { name: "确认", exact: true }).click();
+      await expect(revokeDialog.getByRole("alert")).toBeVisible();
+      assert.equal(users[0].instances[0].status, "cancelled");
+      await revokeDialog.getByRole("button", { name: "确认", exact: true }).click();
+      await expect(revokeDialog).toHaveCount(0);
+      assert.equal(revokeCount(), 2, "retry must repeat revocation, never permanent deletion");
+      assert.ok(users.some(user => user.id === userId), "a lost cancellation response must not delete the account");
       await expect(page.getByText("已取消", { exact: true })).toBeVisible();
       failDelete = true;
       await page.getByRole("button", { name: "实例列表", exact: true }).click();
@@ -366,6 +387,16 @@ try {
       await page.goto(`http://127.0.0.1:${address.port}/admin/#details/018f1f4b-7a5d-7b5f-8d31-123456789abe`);
       await expect(page.getByRole("button", {name:"详细信息", exact:true})).toBeEnabled();
       await checkWebLanguage(page, { routes: [["details/018f1f4b-7a5d-7b5f-8d31-123456789abe", "Details"], ["instances", "Instance list"], ["logs", "Logs"]], names: ["新实例"] });
+      await page.goto(`http://127.0.0.1:${address.port}/admin/#details/018f1f4b-7a5d-7b5f-8d31-123456789abe`);
+      await page.getByRole("button", { name: "取消配对", exact: true }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "确认", exact: true }).click();
+      await page.getByRole("button", { name: "删除实例", exact: true }).click();
+      failDelete = false;
+      await page.getByRole("dialog", { name: "删除实例", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+      await expect(page).toHaveURL(/#instances$/);
+      await expect(page.getByRole("region", { name: "实例设置", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "新实例", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("alert")).toHaveCount(0);
       // More than two pages with identical names must retain stable UUID order.
       users = Array.from({length:125}, (_,index)=>backupUser({
         id:`018f1f4b-7a5d-7b5f-8d31-${String(index+100000000000).padStart(12,"0")}`,
@@ -397,8 +428,8 @@ try {
       await navigation.getByRole("button",{name:"下一页",exact:true}).click();
       const removed = users[50].id;
       await expect(rows.first().getByRole("link")).toHaveAttribute("href",`#details/${removed}`);
-      await rows.first().getByRole("button",{name:"删除",exact:true}).click();
-      await rows.first().getByRole("button",{name:"确认删除",exact:true}).click();
+      await rows.first().getByRole("button",{name:"取消或撤销",exact:true}).click();
+      await rows.first().getByRole("button",{name:"确认取消或撤销",exact:true}).click();
       await expect(navigation.getByRole("button",{name:"上一页",exact:true})).toBeDisabled();
       await expect(statistics.getByRole("row").nth(1)).toContainText("125 / 62");
       await navigation.getByRole("button",{name:"下一页",exact:true}).click();

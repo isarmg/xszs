@@ -47,3 +47,12 @@ npm run test:browser --prefix web
 压缩适配只用于静态 WASM，不涉及认证/API 响应。通用协商实现来自固定 xcss crate 的 `xcss::web_assets::wasm::response`，产品不再保存复制的 Rust 模块或 Vite 插件。浏览器快照使用上游显式 `--destination` 导出并核验来源。
 
 CI 安装候选和正式 release 均单独审计 `web/xcss-web/Cargo.lock`，保留原根锁打包审计和 yanked 检查。内嵌 `xcss-web-build.json` 的前端 Rust 依赖清单补充现有 SBOM，当前并未将它合并进远端打包器生成的 CycloneDX 文件。
+
+### 实例取消与永久删除
+
+管理员实例生命周期使用两个独立动作，均要求管理员会话和 CSRF 校验：
+
+- `POST /api/v1/admin/instances/{id}/revoke` 将待配对实例取消、已配对实例撤销，并使客户端凭据和 API Key 失效。成功返回 `204`；对已取消或撤销实例重复调用仍返回 `204`，保留账号、实例和历史，不会升级为永久删除。
+- `DELETE /api/v1/admin/instances/{id}` 只永久删除已取消或撤销且没有备份记录、待回收 blob 的空实例及其账号。活动实例返回 `409`，不会隐式取消。成功返回 `204`；不存在的实例返回 `404`。
+
+列表与详情确认时固定动作。取消/撤销的响应丢失后可以重试同一动作；永久删除需要另一次明确确认。详情永久删除成功后返回实例列表，不再保留失效的设置表单。

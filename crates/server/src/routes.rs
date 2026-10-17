@@ -240,6 +240,10 @@ pub fn router(
             put(admin::rotate_instance_authorization),
         )
         .route(
+            "/api/v1/admin/instances/{id}/revoke",
+            post(admin::revoke_instance),
+        )
+        .route(
             "/api/v1/admin/instances/{id}",
             axum::routing::delete(admin::remove_instance),
         )

@@ -94,3 +94,5 @@ blob rooted unlink/删行及 committed/orphan staging 清理。协调不周期�
 若同一资源已有后续成功提交，旧 operation 返回 `upload_superseded`，不会恢复旧内容。
 真实的新版本（包括 A→B→A 或只更新 metadata）必须使用新的准备 generation UUID；相同内容的新 operation 不与未完成旧 operation 合并。
 本契约不改变资源 manifest JSON 或数据库 Schema。
+
+实例取消/撤销使用 `POST /api/v1/admin/instances/{id}/revoke`，重复调用保持终态且不删除账号；永久删除使用独立的 `DELETE /api/v1/admin/instances/{id}`，仅接受已取消/撤销且没有备份记录或待回收 blob 的实例。活动实例 DELETE 返回 409。详见 [Web 生命周期合同](xcss-web.md#实例取消与永久删除)。

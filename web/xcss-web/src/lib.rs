@@ -313,8 +313,8 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
                         #[allow(unused_braces)]
                         {
                             t(
-                                "删除未能确认，请刷新实例列表核对。",
-                                "Deletion could not be confirmed. Refresh and check the instance list.",
+                                "操作未能确认，请刷新实例列表核对。",
+                                "The operation could not be confirmed. Refresh and check the instance list.",
                             )
                         },
                     )
@@ -497,7 +497,7 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
                                                                             t("操作系统/架构", "Operating system / architecture"),
                                                                             t("最后在线", "Last seen"),
                                                                             t("已用容量 / 配额", "Used / quota"),
-                                                                            t("删除", "Delete"),
+                                                                            t("操作", "Actions"),
                                                                         ]
                                                                             .into_iter()
                                                                             .map(|v| {
@@ -528,6 +528,8 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
                                                                         .as_ref()
                                                                         .map(|i| i.id.clone())
                                                                         .unwrap_or("—".into());
+                                                                    let permanent = client.as_ref().is_some_and(|i| matches!(i.status.as_str(), "cancelled" | "revoked"));
+                                                                    let action = if permanent { "delete" } else { "revoke" };
                                                                     let i2 = id.clone();
                                                                     let i3 = id.clone();
                                                                     View::new(
@@ -631,7 +633,7 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
                                 {
                                     IntoRender::into_render({
                                         move || {
-                                            if candidate.get() == id {
+                                            if candidate.get() == format!("{action}:{id}") {
                                                 let target = i2.clone();
                                                 View::new((
     xcss_web::html::button()
@@ -654,7 +656,7 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
             #[allow(unused_braces)]
             {
                 IntoRender::into_render({
-                    t("确认删除", "Confirm delete")
+                    if permanent { t("确认删除", "Confirm delete") } else { t("确认取消或撤销", "Confirm cancel or revoke") }
                 })
             },
         )
@@ -667,8 +669,8 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
         .on(
             xcss_web::ev::click,
             move |_| mutation(
-                format!("/api/v1/admin/instances/{target}"),
-                "DELETE",
+                format!("/api/v1/admin/instances/{target}{}", if permanent { "" } else { "/revoke" }),
+                if permanent { "DELETE" } else { "POST" },
                 None,
                 busy,
                 action_error,
@@ -687,7 +689,7 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
     xcss_web::html::button()
         .child(
             #[allow(unused_braces)]
-            { IntoRender::into_render({ t("删除", "Delete") }) },
+            { IntoRender::into_render({ if permanent { t("删除", "Delete") } else { t("取消或撤销", "Cancel or revoke") } }) },
         )
         .class("xcss-button")
         .disabled(
@@ -697,7 +699,7 @@ fn Overview(revision: RwSignal<u64>) -> impl IntoView {
         )
         .on(
             xcss_web::ev::click,
-            move |_| candidate.set(target.clone()),
+            move |_| candidate.set(format!("{action}:{target}")),
         ),
 )
                                                     .into_any()
@@ -1434,7 +1436,7 @@ fn UserDetails(
                                     xcss_web::ev::click,
                                     move |_| {
                                         error.set(None);
-                                        dialog.set("remove".into());
+                                        dialog.set(if terminal.get_untracked() { "delete" } else { "revoke" }.into());
                                     },
                                 ),
                         ))
@@ -1451,6 +1453,7 @@ fn UserDetails(
                     (!dialog.get().is_empty())
                         .then(|| {
                             let rotating = dialog.get() == "rotate";
+                            let permanent = dialog.get() == "delete";
                             let target = instance
                                 .get_untracked()
                                 .map(|i| i.id)
@@ -1467,7 +1470,7 @@ fn UserDetails(
                     {
                         if rotating {
                             t("更换密码", "Change password")
-                        } else if terminal.get_untracked() {
+                        } else if permanent {
                             t("删除实例", "Delete instance")
                         } else {
                             t("取消或撤销实例", "Cancel or revoke instance")
@@ -1482,15 +1485,15 @@ fn UserDetails(
                                 "更换密码会立即撤销当前客户端凭据。客户端必须使用新密码重新配对。",
                                 "Changing the password immediately revokes the current client credential. The client must pair again using the new password.",
                             )
-                        } else if terminal.get_untracked() {
+                        } else if permanent {
                             t(
                                 "永久删除这条终态且没有备份数据的实例信息。",
                                 "Permanently delete this terminal instance entry when it owns no backup data.",
                             )
                         } else {
                             t(
-                                "密码和访问令牌将立即失效。终态实例之后可从列表永久删除。",
-                                "The password and access token are invalidated immediately. The terminal instance can then be permanently deleted from the list.",
+                                "密码和访问令牌将立即失效。重复取消或撤销保留实例历史；永久删除需要另行确认。",
+                                "The password and access token are invalidated immediately. Repeating cancellation or revocation preserves instance history; permanent deletion requires a separate confirmation.",
                             )
                         }
                     },
@@ -1503,10 +1506,15 @@ fn UserDetails(
                                 "更换未能确认，请刷新核对密码后再操作。",
                                 "The change could not be confirmed. Refresh and verify the password before another action.",
                             )
+                        } else if permanent {
+                            t(
+                                "删除未能确认，请刷新核对实例状态。",
+                                "Deletion could not be confirmed. Refresh and check the instance state.",
+                            )
                         } else {
                             t(
-                                "操作未能确认，请刷新核对实例状态。",
-                                "The operation could not be confirmed. Refresh and check the instance state.",
+                                "取消或撤销未能确认，可重试同一操作或刷新核对状态；重试不会永久删除实例。",
+                                "Cancellation or revocation could not be confirmed. Retry this action or refresh and check its state; retries never permanently delete the instance.",
                             )
                         }
                     },
@@ -1523,17 +1531,21 @@ fn UserDetails(
                         Callback::new(move |()| {
                             let path = format!(
                                 "/api/v1/admin/instances/{target}{}", if rotating {
-                                "/authorization" } else { "" }
+                                "/authorization" } else if permanent { "" } else { "/revoke" }
                             );
                             mutation(
                                 path,
-                                if rotating { "PUT" } else { "DELETE" },
+                                if rotating { "PUT" } else if permanent { "DELETE" } else { "POST" },
                                 None,
                                 busy,
                                 error,
                                 move |_| {
                                     dialog.set(String::new());
-                                    revision.update(|v| *v += 1);
+                                    if permanent {
+                                        navigate("instances");
+                                    } else {
+                                        revision.update(|v| *v += 1);
+                                    }
                                 },
                             );
                         })
