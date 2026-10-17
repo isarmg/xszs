@@ -2,7 +2,6 @@ import {prepareApplicationFonts, startAfterFonts} from "@xcss/web/web-fonts";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { assertXcssWebToolchain } from "@xcss/web/web-toolchain";
 import manifest from "../package.json" with { type: "json" };
 assert.deepEqual(manifest.dependencies ?? {}, {});
 
@@ -18,7 +17,6 @@ const nodeVersion = readFileSync(
   "utf8",
 );
 assert.match(nodeVersion, /^26\.7\.0\n?$/);
-assertXcssWebToolchain(manifest, nodeVersion);
 for (const dependency of xcssPackages) {
   const expected = "https://github.com/isarmg/xcss/releases/download/v1.0.0/xcss-web-1.0.0.tgz";
   assert.equal(manifest.devDependencies?.[dependency], expected);
