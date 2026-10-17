@@ -81,6 +81,9 @@ jobs:
       - name: Verify current administrator and backup Web flows
         working-directory: web
         run: node tests/browser-acceptance.mjs
+      - name: Verify startup failure visibility and explicit reload
+        working-directory: web
+        run: npm run test:startup
       - run: ./scripts/check-workflow-supply-chain.sh
       - name: Verify product packaging boundary
         run: |
