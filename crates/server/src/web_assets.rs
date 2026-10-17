@@ -1,6 +1,4 @@
 //! The xcss-generated inventory and bytes are part of this executable.
-#[path = "xcss_web_assets.rs"]
-mod xcss_web_assets;
 
 include!(concat!(env!("OUT_DIR"), "/xcss-web-assets.rs"));
 
@@ -13,7 +11,7 @@ pub(crate) fn response(
     method: &axum::http::Method,
     headers: &axum::http::HeaderMap,
 ) -> axum::response::Response {
-    xcss_web_assets::response(path, method, headers, |path, method, headers| {
+    xcss::web_assets::wasm::response(path, method, headers, |path, method, headers| {
         xcss::web_assets::response(ASSETS, path, method, headers)
     })
     .map(axum::body::Body::from)
