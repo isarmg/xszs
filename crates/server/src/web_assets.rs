@@ -1,6 +1,6 @@
 //! The xcss-generated inventory and bytes are part of this executable.
-#[path = "leptos_assets.rs"]
-mod leptos_assets;
+#[path = "xcss_web_assets.rs"]
+mod xcss_web_assets;
 
 include!(concat!(env!("OUT_DIR"), "/xcss-web-assets.rs"));
 
@@ -13,14 +13,14 @@ pub(crate) fn response(
     method: &axum::http::Method,
     headers: &axum::http::HeaderMap,
 ) -> axum::response::Response {
-    leptos_assets::response(path, method, headers, |path, method, headers| {
+    xcss_web_assets::response(path, method, headers, |path, method, headers| {
         xcss::web_assets::response(ASSETS, path, method, headers)
     })
     .map(axum::body::Body::from)
 }
 
 #[cfg(test)]
-mod leptos_response_tests {
+mod xcss_web_response_tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 

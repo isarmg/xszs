@@ -1,6 +1,6 @@
 # Rust 原生 Web 构建与测试
 
-生产前端编译、资源整理、gzip、清单、预算/许可证检查和后端集成使用本仓库 `tools/web-build`，不需要 `npm ci`、Node 或 Vite。后端仍为 Axum。前端只使用裁剪的 Leptos CSR；框架源码与公共组件由 xcss 统一维护与同步。
+生产前端编译、资源整理、gzip、清单、预算/许可证检查和后端集成使用本仓库 `tools/web-build`，不需要 `npm ci`、Node 或 Vite。后端仍为 Axum。前端只使用裁剪的 xcss-web CSR；框架源码与公共组件由 xcss 统一维护与同步。
 
 在产品根目录执行：
 
@@ -14,7 +14,7 @@ cargo +1.99.0 run --quiet --locked --manifest-path tools/web-build/Cargo.toml --
 
 管理界面挂载于 `/admin/`，根路径 `/` 保持 404。`web/rust-web.toml` 的 `base` 必须为 `/admin/`；字体预载使用 vendor 源路径，由构建器转换为同一管理前缀下的实际哈希 URL。开发与预览访问 `/admin/`，API 仍使用 `/api/v1`。
 
-字体等待样式通过 `main-leptos.js` 导入已有 `boot.css`，随普通外链 CSS 输出。HTML 不含内联启动样式，继续遵守 Axum 原有严格 `style-src 'self'`；无需放宽 CSP。
+字体等待样式通过 `main-xcss-web.js` 导入已有 `boot.css`，随普通外链 CSS 输出。HTML 不含内联启动样式，继续遵守 Axum 原有严格 `style-src 'self'`；无需放宽 CSP。
 
 package.json 的 build/dev/check/test Rust 入口只是这些命令的便利别名。Node、Playwright、Vite 和少量旧 JS 库只保留在 devDependencies，供浏览器验收与历史 TypeScript/React 对照测试使用；生产构建不读取 node_modules。Vite 的 transformWithOxc 历史测试继续执行，未用新的断言替代原断言。
 
@@ -24,6 +24,6 @@ CI 与正式打包脚本的生产 build/server 直接调用 Cargo，保留原 so
 
 ## 函数式视图
 
-当前 `web/leptos/src` 的界面使用普通 Rust builder、元组、迭代器和闭包组合，已移除 authored `view!`。`#[component]` 仅处理 Leptos 组件参数与生命周期；DOM 构造直接调用原有 Leptos API，没有添加新的模板语法。Rustfmt、WASM 类型检查、Clippy 与原浏览器断言继续适用。
+当前 `web/xcss-web/src` 的界面使用普通 Rust builder、元组、迭代器和闭包组合，已移除 authored `view!`。`#[component]` 仅处理 xcss-web 组件参数与生命周期；DOM 构造直接调用原有 xcss-web API，没有添加新的模板语法。Rustfmt、WASM 类型检查、Clippy 与原浏览器断言继续适用。
 
 一次性迁移由 xcss 的 `tools/rustify-views` 使用锁定 CSR 宏 codegen 完成，生产编译不调用此转换器。组件适配块保留了 codegen 对 let-and-return、unit props 的局部 lint 边界；业务逻辑没有全文件 lint 豁免。后续维护可直接编辑普通 Rust 视图，再执行相同构建与浏览器验收。

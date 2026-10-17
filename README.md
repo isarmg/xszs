@@ -16,7 +16,7 @@ The server manages application authentication, verified instance and file quotas
 
 See the [documentation](docs/README.md).
 
-前端使用 Leptos CSR + Rust/WASM，后端继续使用 Axum。构建、验收和迁移边界见 [Leptos 界面维护说明](docs/leptos-web.md)。
+前端使用 xcss-web CSR + Rust/WASM，后端继续使用 Axum。构建、验收和迁移边界见 [xcss-web 界面维护说明](docs/xcss-web.md)。
 
 
 生产前端构建使用仓库内 Rust 工具，无需安装 npm 依赖。准备 Rust 1.99.0、wasm32-unknown-unknown target 和 wasm-bindgen-cli 0.2.129 后，在产品根目录执行：

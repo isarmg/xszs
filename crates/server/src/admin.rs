@@ -1125,7 +1125,7 @@ mod tests {
             crate::web_assets::ASSETS
                 .iter()
                 .any(|asset| asset.path.ends_with(".wasm")),
-            "Leptos browser WASM must be embedded"
+            "xcss-web browser WASM must be embedded"
         );
         for asset in crate::web_assets::ASSETS {
             let path = asset.path;
@@ -1179,7 +1179,7 @@ mod tests {
                     "OFL.txt" | "NORMAL-LICENSE.txt" | "CJK-LICENSE.txt" => {
                         assert!(license.contains("SIL OPEN FONT LICENSE"));
                     }
-                    "LICENSE-leptos-MIT.txt" | "LICENSE-leptos-macro-MIT.txt" => {
+                    "LICENSE-xcss-web-core-MIT.txt" | "LICENSE-xcss-web-macro-MIT.txt" => {
                         assert!(license.contains("MIT License"));
                         assert!(license.contains("Permission is hereby granted, free of charge"));
                     }
@@ -1263,7 +1263,7 @@ mod tests {
             .to_str()
             .unwrap();
         // Keep JavaScript evaluation and inline styles disabled while allowing
-        // the Leptos WASM module and generated corner SVG Blob images.
+        // the xcss-web WASM module and generated corner SVG Blob images.
         assert_eq!(
             policy.split(';').map(str::trim).collect::<Vec<_>>(),
             [

@@ -36,11 +36,11 @@ for (const snapshot of ["content-blocks.css", "provenance.json", "verify.mjs"]) 
   assert.equal(existsSync(new URL(`../appearance/${snapshot}`, import.meta.url)), false, "xcss CSS must not be copied into the product");
 }
 
-const main = readFileSync(new URL("../src/main-leptos.js", import.meta.url), "utf8");
+const main = readFileSync(new URL("../src/main-xcss-web.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 assert.match(main, /pkg\/xszs_web\.js/);
 assert.match(main, /xszs_web_bg\.wasm\?url/);
-const rust = readFileSync(new URL("../leptos/src/lib.rs", import.meta.url), "utf8");
+const rust = readFileSync(new URL("../xcss-web/src/lib.rs", import.meta.url), "utf8");
 // Ignore generated lint attributes and formatting while retaining the shared
 // shell renderer, its matching props builder, and the exact product binding.
 const shellStructure = rust.replace(/#\[[^\]]*\]/g, "").replace(/\s+/g, "");
