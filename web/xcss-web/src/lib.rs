@@ -9,7 +9,7 @@ use xcss_web::components::{AccountPage, AdminShell};
 use xcss_web::prelude::*;
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
-    xcss_web::mount("root", || {
+    xcss_web::mount_server("root", || {
         View::new({
             #[allow(unreachable_code)]
             #[allow(unused_mut)]

@@ -10,10 +10,8 @@ import "@xcss/web/web-fonts/fonts.css";
 import "@xcss/web/admin-ui/styles.css";
 import "@xcss/web/admin-ui/date-range.css";
 import "./styles.css";
-import { startServerCorners } from "@xcss/web/admin-ui/server-corners";
 import wasmUrl from "../pkg/xszs_web_bg.wasm?url";
 await startApplication(async () => {
-  startServerCorners(document);
   const { default: init } = await import("../pkg/xszs_web.js");
   await init({ module_or_path: wasmUrl });
 });
