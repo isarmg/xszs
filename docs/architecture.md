@@ -6,15 +6,15 @@
 
 根 `Cargo.toml` 是多包 workspace；所有依赖版本与 Rust lint 在根声明。`crates/server/` 保存 Server 源码、构建入口和业务测试；`crates/protocol/` 保存 `xszs-protocol` 唯一业务协议源码。内部包继承 workspace 依赖和 `unsafe_code = "forbid"`，不各自维护公共版本。
 
-`web/` 保存管理界面；`config/` 保存示例；`schema/` 保存当前 DDL 和生成定义；`scripts/` 保存构建、检查与打包；主机安装和统一服务模板由独立 XSSI 仓库保存；`docs/` 保存设计、任务说明和发行记录。仅根目录管理 `Cargo.lock`。同类目录保持相同职责，不按产品名或语言重新命名；目录迁移必须同时校验包含路径、CI 与实际归档来源。
+`web/` 保存管理界面；`config/` 保存示例；`schema/` 保存当前 DDL 和生成定义；`scripts/` 保存构建、检查与打包；主机安装和统一服务模板由独立 XSSI 仓库保存；`docs/` 保存设计、任务说明和发行记录。Server workspace 使用根 `Cargo.lock`；浏览器 crate 与 Rust Web 构建器分别维护 `web/xcss-web/Cargo.lock` 和 `tools/web-build/Cargo.lock`。同类目录保持相同职责，不按产品名或语言重新命名；目录迁移必须同时校验包含路径、CI 与实际归档来源。
 
 ## 模块与定义来源
 
-管理 Web 中 `OverviewView.tsx` 维护有界实例页及服务器全局统计，`UserDetailsView.tsx` 维护单实例编辑/授权，`LogsView.tsx` 维护日期、实例作用域、日志游标与请求预算；两种分页复用 `PageNavigation.tsx`。`main.tsx` 只组合导航与按 ID 的详情读取，不包含分页实现。
+管理 Web 的 Rust 实现在 `web/xcss-web/src/lib.rs`：`Overview` 维护有界实例页及服务器全局统计，`Details`/`UserDetails` 维护按 ID 读取的单实例编辑与授权，`Logs` 维护日期和实例作用域。`common.rs` 提供 `Pagination`、`PageNav`、日期控件与有界请求，`contracts.rs` 和 `models.rs` 校验响应并绑定查询身份；`Application` 组合导航和当前视图。
 
 领域按 config / lifecycle / administration / media / upload / storage 划分。`routes.rs` 与 `admin.rs` 执行入口授权，`library.rs` 管理媒体语义，`upload_commit.rs` 管理持久提交与恢复，`storage.rs` / `rooted_fs.rs` 管理实际文件边界，`database.rs` 管理当前 Schema。 `main.rs` 仅解析 ROOT 并进入运行；`config_definition.rs`、`installation_definition.rs` 和构建导出的契约材料定义当前配置、DDL、凭据与资源；初始化、只读维护和密码重置由独立 XSSI 辅助程序实施。
 
-软件身份来自 Cargo，发行配置须与其一致；业务协议来自 `crates/protocol/`，当前 DDL 来自 `schema/`。当前 Schema revision/指纹为 1、`0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`，此次保持不变。Rust 与 Web xcss 使用已发布的完整 Git revision、精确版本或具备完整性摘要的发行包，不依赖同级源码作为正式构建输入。候选 xcss 联调只能作为明确记录的临时覆盖，不能伪装成已发布依赖。
+软件身份来自 Cargo，发行配置须与其一致；业务协议来自 `crates/protocol/`，当前 DDL 来自 `schema/`。当前 Schema revision/指纹为 1、`0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`，此次保持不变。Rust 与 Web xcss 使用固定的完整 Git revision、精确版本或具有来源与摘要的快照，不依赖同级源码作为正式构建输入。修订和摘要用于核验来源与字节，发行状态须另行验收；候选 xcss 联调只能作为明确记录的临时覆盖。
 
 ## 运行与安全边界
 

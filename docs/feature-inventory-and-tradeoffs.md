@@ -1,6 +1,6 @@
 # xszs 完整功能与取舍清单
 
-本文描述 xszs `1.0.0` 的服务端、React 管理 Web、协议、存储和交付边界。
+本文描述 xszs 当前工作树的服务端、xcss-web 管理 Web、协议、存储和交付边界。
 服务端源码、`schema/generated/current_schema.sql` 和发行 manifest 是实现依据。
 移动队列、FFI、Android/iOS 权限与交互由 [Client 文档](https://github.com/isarmg/xszc/blob/main/docs/README.md)维护。
 
@@ -35,7 +35,7 @@ xcss wire 常量；其身份键是 `_common_administrators.username`。`accounts
 ### 1.4 删除闭包
 
 删除功能需同时检查：Rust crates、Server route/DTO、两个 SQLite Schema、Kotlin/Swift 宿主、C/JNI FFI、
-React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正反测试和中文文档。只隐藏按钮、只
+Rust/WASM 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正反测试和中文文档。只隐藏按钮、只
 停止调用或只删一个平台实现，都不能视为功能已从项目边界移除。
 
 ## 2. 产品定位、平台和目录
@@ -44,10 +44,10 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 |---|---|---|---|---|---|---|
 | MED-P-001 | Android/iOS 把授权范围内的照片、视频和设备生成缩略图备份到自托管 Server | Client 仓库、`crates/server` | 核心 | 高 | 项目不再是完整移动媒体备份系统 | 两平台至少一条原始媒体+缩略图端到端 |
 | MED-P-002 | Server 唯一支持 `x86_64-unknown-linux-gnu`，正式主机唯一为 Linux AMD64 | `xcss::server_target`、server `build.rs`、release/systemd/scripts | 保障 | 高 | 会产生未经验证的 Server 平台制品 | 非目标编译、错误 ELF、错误 uname、systemd architecture |
-| MED-P-004 | Server 软件为 `1.0.0`、数据库合同为 `v1`/revision 1；Client 发行与移动状态另有独立身份 | metadata、Client mobile epoch、release identity | 保障 | 高 | 混用版本维度会误拒绝兼容状态或误收旧状态 | 各边界按自己的 product/version/revision 精确拒绝 |
+| MED-P-004 | Server 软件为 `1.0.1`、数据库合同为 `v1`/revision 1；Client 发行与移动状态另有独立身份 | metadata、Client mobile epoch、release identity | 保障 | 高 | 混用版本维度会误拒绝兼容状态或误收旧状态 | 各边界按自己的 product/version/revision 精确拒绝 |
 | MED-P-005 | 数据库只接受当前精确结构 | Server CLI、Client open path | 保障 | 高 | 在线转换会把未知状态带入服务进程 | CLI 清单；Schema mismatch 只读失败 |
-| MED-P-006 | Server 配置位于 `config/`、部署资产位于 `deploy/`；移动客户端只存在于独立 Client 仓库 | 仓库目录 | 开发运维 | 低 | 跨仓库路径和构建命令易被混用 | README、CI 和脚本只引用实际存在的目录 |
-| MED-P-007 | React/Vite 管理 Web 位于 `web/`，随 Server 构建和交付 | 目录结构、workspace scripts | 开发运维 | 低 | 客户端代码位置不一致，维护人员难以识别边界 | README、CI、构建脚本使用统一路径 |
+| MED-P-006 | Server 配置位于 `config/`，部署材料由固定 xssi 修订及产品安装定义生成；移动客户端只存在于独立 Client 仓库 | 仓库目录 | 开发运维 | 低 | 跨仓库路径和构建命令易被混用 | README、CI 和脚本只引用实际存在的目录 |
+| MED-P-007 | Rust/xcss-web 管理 Web 位于 `web/`，由仓库内 Rust 工具构建并随 Server 交付 | 目录结构、workspace scripts | 开发运维 | 低 | 客户端代码位置不一致，维护人员难以识别边界 | README、CI、构建脚本使用统一路径 |
 | MED-P-008 | 原始媒体在 Server 使用 `plain-v1` 明文字节，传输机密性依赖 HTTPS | `StorageEncoding::PlainV1`、Client `crates/crypto` | 核心 | 高 | 改成端到端密文会重写缩略图、恢复、去重和密钥生命周期 | byte-for-byte round trip；HTTP 明文直连不得公网暴露 |
 | MED-P-009 | Server Rust 固定 xcss Git revision，Web 快照固定已发布来源、包 integrity 与逐文件 SHA-256，无相邻工作区来源 | Cargo、`web/vendor/xcss/SOURCE.json`、Rust 构建器 | 保障 | 高 | 平台行为随未固定依赖漂移 | locked 独立构建、xcss revision test 与 Web 门禁 |
 
@@ -56,7 +56,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
 | MED-A-001 | 控制面只有 Administrator，平台表由 xcss Composer 生成 | `_common_administrators`、Admin Core | 核心 | 高 | 删除认证会公开备份实例与路径 | Session 固定 admin；无产品管理员表 |
-| MED-A-002 | 仅显式 `init --username admin` 从 stdin 读取初始密码；已有身份不会被覆盖 | `initialize`、Admin Core | 保障 | 高 | 避免秘密写入配置或环境，避免隐式重置账户 | 空库初始化、已有管理员保持不变 |
+| MED-A-002 | 仅独立 xssi 安装流程从 stdin 读取初始密码并初始化当前状态；已有身份不会被覆盖 | 安装材料、xssi setup、Admin Core | 保障 | 高 | 避免秘密写入配置或环境，避免隐式重置账户 | 空库初始化、已有管理员保持不变 |
 | MED-A-003 | Administrator username 使用 xcss 唯一 canonical 规则：登录 candidate 1..64 printable ASCII，经 trim ASCII + lowercase 后必须为 3..64 bytes、首尾字母数字、字符仅 `[a-z0-9._-]` | `normalize_administrator_username`、`require_canonical_administrator_username`、Schema CHECK | 保障 | 中 | 同一身份可用大小写/空白变体绕过限流或唯一约束，跨项目身份语义会漂移 | 大小写/首尾空白正例；`@`、Unicode、内部空白、控制字符、首尾分隔符和超长负例 |
 | MED-A-004 | 管理员密码只接受 xcss 当前 Argon2id 策略 | Admin Core、Admin Auth | 保障 | 高 | 产品不能另设 hash 分支 | PHC 参数与口令策略负例 |
 | MED-A-005 | 三个浏览器认证入口精确为 `/api/v1/auth/login`、`/api/v1/auth/session`、`/api/v1/auth/logout` | xcss path constants、`routes.rs` | 保障 | 中 | 路径漂移破坏共享客户端；别名扩大攻击面 | method/path 矩阵，合同外路径拒绝 |
@@ -75,7 +75,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 | MED-A-019 | `/metrics` 使用与其他身份分离的可选 Bearer `METRICS_TOKEN` | `metrics.rs`、Config | 保障 | 中 | 聚合容量可被公开，或监控被迫保存 Administrator Cookie | 无/错/对 token；空配置语义 |
 | MED-A-020 | 配对只对数据库确认的待配对实例计数，无效授权码不创建限额项；匿名请求共用有界工作池 | `login_admission.rs`、`routes.rs` | 保障 | 高 | 随机输入耗尽实例限额状态 | 无效授权码、实例隔离、工作池容量 |
 | MED-A-021 | TLS 由外部入口负责；生产 Cookie 使用 Secure，X-Forwarded-Proto 不决定传输安全 | `router`、`development` | 保障 | 高 | 安全部署边界必须由入口与防火墙保证 | Cookie 属性、伪造转发头不影响启动/业务 |
-| MED-A-022 | 所有 HTTP 错误统一 xcss `ErrorEnvelope`，429 保留 `Retry-After` | `error.rs`、`xcss::error` | 保障 | 中 | React/移动端需要项目专用错误分支，或内部文本泄漏 | 400/401/403/404/409/429/500 exact keys |
+| MED-A-022 | 所有 HTTP 错误统一 xcss `ErrorEnvelope`，429 保留 `Retry-After` | `error.rs`、`xcss::error` | 保障 | 中 | Web/移动端需要项目专用错误分支，或内部文本泄漏 | 400/401/403/404/409/429/500 exact keys |
 
 ## 4. 上传协议、配额与对象存储
 
@@ -130,19 +130,19 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 两端原生交互、权限、后台调度、队列和恢复校验见 Client 仓库；本仓库只验证服务端协议与数据行为。
 接口消费者与管理员身份边界见[接口与消费者边界](https://github.com/isarmg/xszs/blob/main/docs/interface-consumers.md)。
 
-## 7. 基于 React/Vite 的管理员 Web
+## 7. 基于 Rust/xcss-web 的管理员 Web
 
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
 | MED-W-001 | xcss Shell 统一 restore/login/logout、导航、通知与诊断，Session/CSRF 只在内存；产品没有第二套登录状态机 | `web/xcss-web/src`、公共 Rust `AdminShell` | 保障 | 高 | 认证竞态或 Secret 持久化 | 共享 Shell 测试、消费者 Chromium/Firefox 验收 |
-| MED-W-002 | 统一完整有序实例列表、详细信息和日志视图；实例列表按 NOCASE/原名/UUID 排序并以每页 50 条正反 keyset 遍历，全局统计来自 SQL 聚合，详情独立按 ID 读取；日志默认显示 UTC 当天，按 UTC 日历日期范围（包含起止当天）和实例筛选；年月日数字直接编辑、回车应用，前后端拒绝非法日期和倒置范围，以每页 50 条正反游标遍历全部审计记录；管理员账号仅由 xcss Shell 右上角人物图标设置；业务读取失败清除旧数据，安全错误显示 Request ID 和显式重试 | `Application`、`OverviewView`、`UserDetailsView`、`LogsView` | 建议保留 | 中 | 身份域混淆或失败后仍显示过期状态 | 125 同名实例三页、全局统计、独立详情、创建/删除后复核、超过 200 条同时间日志完整翻页、坏游标、实例过滤与日期边界、失败/重试、账号设置、无内部错误泄漏 |
+| MED-W-002 | 统一完整有序实例列表、详细信息和日志视图；实例列表按 NOCASE/原名/UUID 排序并以每页 50 条正反 keyset 遍历，全局统计来自 SQL 聚合，详情独立按 ID 读取；日志默认显示 UTC 当天，按 UTC 日历日期范围（包含起止当天）和实例筛选；年月日数字直接编辑、回车应用，前后端拒绝非法日期和倒置范围，以每页 50 条正反游标遍历全部审计记录；管理员账号仅由 xcss Shell 右上角人物图标设置；业务读取失败清除旧数据，安全错误显示 Request ID 和显式重试 | `Application`、`Overview`、`UserDetails`、`Logs` | 建议保留 | 中 | 身份域混淆或失败后仍显示过期状态 | 125 同名实例三页、全局统计、独立详情、创建/删除后复核、超过 200 条同时间日志完整翻页、坏游标、实例过滤与日期边界、失败/重试、账号设置、无内部错误泄漏 |
 | MED-W-003 | 总览聚合 total instance、used/pending/quota 和每实例资源数；在线数由实例列表统一计算 | `/api/v1/admin/overview`、Overview guard | 建议保留 | 中 | 容量和实例状态只能手工查询 | unlimited quota、large safe integer、空库 |
-| MED-W-004 | 新建按钮直接创建永久启用的默认名称实例，原子创建自动存储、默认配额和客户端授权码；详情以实例名称、只读实例 ID 和实例授权码展示配对信息；授权码可查看和轮换，实例可取消并在终态删除整个空实例；GiB 配额在详情页编辑并换算为整数字节 | `Application`、`BackupUserForm`、`InstanceManager` | 核心 | 高 | 首次配对重新暴露基础设施参数、部分成功留下孤立归属或授权未真正撤销 | direct default create、默认值、实例配对/轮换/删除、精确 quota |
-| MED-W-005 | 业务 JSON 在进入组件前校验必需字段与类型，路径只允许 `/api/v1/admin/*` | `web/src/api.ts` | 保障 | 中 | 漂移响应会进入组件，或产品 client 被用于移动路由 | 缺失/错误类型、错误 prefix；当前 guard 容忍响应额外字段 |
+| MED-W-004 | 新建按钮直接创建永久启用的默认名称实例，原子创建自动存储、默认配额和客户端授权码；详情以实例名称、只读实例 ID 和实例授权码展示配对信息；授权码可查看和轮换，实例可取消并在终态删除整个空实例；GiB 配额在详情页编辑并换算为整数字节 | `Application`、`Overview`、`UserDetails` | 核心 | 高 | 首次配对重新暴露基础设施参数、部分成功留下孤立归属或授权未真正撤销 | direct default create、默认值、实例配对/轮换/删除、精确 quota |
+| MED-W-005 | 业务 JSON 在进入组件前校验必需字段与类型，路径只允许 `/api/v1/admin/*` | `web/xcss-web/src/contracts.rs`、`models.rs`、`common.rs` | 保障 | 中 | 漂移响应会进入组件，或产品 client 被用于移动路由 | 缺失/错误类型、错误 prefix；当前 guard 容忍响应额外字段 |
 | MED-W-006 | xcss 统一 system/light/dark 主题；产品不读写浏览器存储 | Shell 主题选择器 | 可选 | 低 | 私有外观与平台漂移 | 移动明暗主题 WCAG AA、无横向溢出 |
 | MED-W-007 | xcss tokens/reset/accessibility 提供 focus、reduced motion、forced colors 基线 | CSS imports、`data-xcss-scope` | 保障 | 中 | 基础行为跨项目漂移 | keyboard、focus、high contrast、CSS digest |
 | MED-W-008 | 业务 CSS 仅保留 `.media-*` 布局，导航/表单/弹窗/通知来自共享 UI，字体使用 Maple 同源资产 | `web/src/styles.css`、xcss CSS imports | 建议保留 | 中 | 重复平台样式重新分叉 | 禁止私有字体/token、窄屏、长文本、progress |
-| MED-W-009 | 精确 Node 26.7.0、React/DOM 19.3.0、TS 7.0.2、Vite 8.3.3 | `.node-version`、package/lock | 开发运维 | 中 | 开发、CI 与发行 bundle 不可复现 | engine、`npm ci`、typecheck、版本断言 |
+| MED-W-009 | 生产 Web 使用 Rust 1.99.0、独立 Cargo.lock 和 wasm-bindgen 0.2.129；Node 26.7.0 与锁定开发依赖用于浏览器验证 | `rust-toolchain.toml`、`web/xcss-web/Cargo.lock`、`.node-version`、Web package/lock | 开发运维 | 中 | 开发、CI 与发行 bundle 不可复现 | engine、`npm ci`、typecheck、版本断言 |
 | MED-W-010 | Rust build 执行来源、许可证和资源预算门禁，普通资产上限 512 KiB、WASM 上限 4 MiB；完整 dist 包含字体与许可 | `tools/web-build`、`web/rust-web.toml` | 开发运维 | 高 | 二进制、字体和发行 manifest 混代 | 构建门禁、实际 dist 浏览器测试 |
 | MED-W-011 | xcss 自动生成内嵌清单绑定 HTML/JS/CSS/WOFF2/许可证；发行只附清单，HTTP 与校验共用 binary 字节，保留 CSP 和 nosniff | `web_assets.rs`、`admin.rs`、XSSI `package.py` | 保障 | 高 | 字体 404、缺少许可证或发布内容漂移 | 全清单实际 HTTP 字节/类型、HEAD/ETag、篡改/重写清单拒绝 |
 
@@ -150,7 +150,7 @@ React 管理页、配置与 systemd、发行 identity/manifest、CI/脚本、正
 
 | ID | 当前功能/特性与真实行为 | 实现/代码锚点 | 分类 | 复杂度 | 删除后的确定后果 | 最低验证/边界 |
 |---|---|---|---|---|---|---|
-| MED-R-001 | Server 软件为 1.0.0，数据库 Schema identity 为 xszs v1、revision 1、SHA `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`；管理员和平台 DDL 由 xcss 组合 | `database.rs`、`schema/generated/current_schema.sql` | 保障 | 高 | 错库或 DDL drift 必须拒绝 | metadata、现场 fingerprint、当前身份精确校验 |
+| MED-R-001 | Server 软件为 1.0.1，数据库 Schema identity 为 xszs v1、revision 1、SHA `0e37f8a3992b1904215d5f4c9ac428448752718506611f818482d890322d300d`；管理员和平台 DDL 由 xcss 组合 | `database.rs`、`schema/generated/current_schema.sql` | 保障 | 高 | 错库或 DDL drift 必须拒绝 | metadata、现场 fingerprint、当前身份精确校验 |
 | MED-R-003 | Server 持完整运行锁后仅复制一次 main/WAL/journal 私有 generation，源未变化确认后在同一快照上完成 schema、integrity、FK、管理员和业务授权检查 | `crates/server/src/database.rs` | 保障 | 高 | 启动验证可能读取跨时刻混合状态或写源库 | WAL、并发变化、symlink、cleanup |
 | MED-R-004 | Server open 使用 WAL、foreign keys、busy timeout，离线 setup 做 integrity/FK 校验 | `database.rs`、生成材料和 XSSI 独立辅助程序 | 保障 | 高 | 并发/损坏行为不可预测 | PRAGMA、corruption、FK violation |
 | MED-R-005 | runtime lock 同时绑定数据库与 DATA_DIR，防止两个 Server 管同一状态 | `runtime_lock.rs` | 保障 | 高 | 双实例可同时提交、清理和改账户路径 | 同 DB/不同 data、同 data/不同 DB、symlink/hardlink |
